@@ -2180,6 +2180,11 @@ CREATE TABLE IF NOT EXISTS bg_modulators (
     tonic_da REAL NOT NULL DEFAULT 0.5,
     lc_ne REAL NOT NULL DEFAULT 0.5,
     serotonin REAL NOT NULL DEFAULT 0.5,
+    -- acetylcholine added via migration 068 (nucleus basalis); inlined here
+    -- so fresh installs satisfy NOT NULL on initial INSERT without relying
+    -- on ALTER TABLE ADD COLUMN backfill behaviour, which varies across
+    -- SQLite versions (3.31 vs 3.45+) and produced NULL on CI Linux.
+    acetylcholine REAL NOT NULL DEFAULT 0.5 CHECK(acetylcholine >= 0.0 AND acetylcholine <= 1.0),
     set_by TEXT,
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
 );
@@ -2938,13 +2943,16 @@ INSERT OR IGNORE INTO nb_attention_targets (name, channel_kind, default_ach_gain
     ('pii_sensitive', 'thalamic_sector', 0.20, 'PII / credential / wallet — high attention so W(m) sees it');
 
 -- Extend bg_modulators with the 4th neuromod dial.
--- Re-run safety: the brainctl migrate runner gates re-application by
--- schema_version (this row gets the version=68 entry below), so the
--- ALTER only fires once per DB. If you're applying the migration via
--- raw sqlite3 against a brain.db that already has the column, this
--- ALTER will fail with a duplicate-column error — that's by design;
--- always go through `brainctl migrate` for live application.
-ALTER TABLE bg_modulators ADD COLUMN acetylcholine REAL NOT NULL DEFAULT 0.5;
+-- NOTE: in this init_schema.sql snapshot, the acetylcholine column has been
+-- inlined into the bg_modulators CREATE TABLE above (line ~2178). The ALTER
+-- below is deliberately omitted in the snapshot — running it via
+-- executescript would crash with a duplicate-column error and abort the
+-- remainder of init_schema. The ALTER still lives in
+-- db/migrations/068_nucleus_basalis.sql for upgrade-path application via the
+-- migrate runner (which uses _apply_sql to tolerate the duplicate column
+-- on re-application). See PR #138 review fb7d5c1 for the CI-failure context
+-- (CI Linux SQLite 3.31 didn't backfill NOT NULL DEFAULT correctly).
+-- ALTER TABLE bg_modulators ADD COLUMN acetylcholine REAL NOT NULL DEFAULT 0.5;
 
 
 -- ============================================================================
