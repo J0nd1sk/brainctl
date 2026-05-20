@@ -341,7 +341,7 @@ def _apply_sql(conn: sqlite3.Connection, sql: str, file_label: str) -> tuple[int
 def _pending_batch_needs_backup(pending: list[tuple[int, str, Path]]) -> bool:
     """Return true when the pending migration batch contains destructive DDL."""
     for _version, _name, path in pending:
-        if _DESTRUCTIVE_MIGRATION_RE.search(path.read_text()):
+        if _DESTRUCTIVE_MIGRATION_RE.search(path.read_text(encoding="utf-8")):
             return True
     return False
 
@@ -460,7 +460,7 @@ def run(
                 "idempotent_notes": [],
             }
     for version, name, path in pending:
-        sql = path.read_text()
+        sql = path.read_text(encoding="utf-8")
         if dry_run:
             applied.append({"version": version, "name": name, "file": path.name, "dry_run": True})
             continue
@@ -687,7 +687,7 @@ def status_verbose(db_path: str) -> dict:
 
     annotated = []
     for version, name, path in _get_migrations():
-        sql = path.read_text()
+        sql = path.read_text(encoding="utf-8")
         expected_cols = add_col_re.findall(sql)   # list of (table, col)
         expected_tbls = create_tbl_re.findall(sql)  # list of table names
 

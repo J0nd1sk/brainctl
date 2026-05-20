@@ -35,6 +35,51 @@ jobs:
         run: pytest tests/ -v
 
   # --------------------------------------------------------------------------
+  # Tier 1b: Windows smoke. Best-effort — currently `continue-on-error: true`
+  # because brainctl ships several optional extras (sqlite-vec, mint, code)
+  # whose native dependencies are POSIX-leaning. The smoke surface here is
+  # the core stdio MCP path plus brain.db init/migrate/CRUD, which is the
+  # 80% of brainctl that a Windows agent operator actually touches.
+  #
+  # Goals:
+  #   * catch read_text() / locale / path-separator / line-ending breakage
+  #   * catch SQLite version backfill bugs on Windows Python builds
+  #   * keep the "ubuntu green = release green" invariant by not blocking
+  #
+  # When this stabilizes (no expected failures for 2-3 PRs), drop the
+  # continue-on-error and promote it to a required check.
+  # --------------------------------------------------------------------------
+  test-windows:
+    runs-on: windows-latest
+    continue-on-error: true
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies (core + mcp only)
+        # `[all]` pulls native deps (sqlite-vec wheel, signing, etc.) whose
+        # Windows wheels are inconsistent. The MCP/init/migrate surface is
+        # what we actually need to smoke on Windows.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[mcp]"
+          pip install pytest
+      - name: Report SQLite version
+        run: python -c "import sqlite3; print('sqlite_version:', sqlite3.sqlite_version)"
+      - name: Smoke — brainctl init on Windows
+        run: |
+          python -m agentmemory init --path "${{ runner.temp }}\brain.db"
+          python -c "import sqlite3; c = sqlite3.connect(r'${{ runner.temp }}\brain.db'); print('integrity:', c.execute('PRAGMA integrity_check').fetchall()); print('bg_modulators:', c.execute('SELECT * FROM bg_modulators').fetchall())"
+      - name: Smoke — core test subset (no native-extra deps)
+        run: |
+          pytest tests/test_mcp_allowed_tools.py tests/test_mcp_tools_consolidated.py tests/test_schema_parity.py tests/test_fk_integrity_triggers.py tests/test_mcp_tools_health.py -v
+
+  # --------------------------------------------------------------------------
   # Docs sync: scripts/check_docs.py asserts that the published doc counts
   # (MCP tool count, command count, etc.) match the implementation.
   # --------------------------------------------------------------------------

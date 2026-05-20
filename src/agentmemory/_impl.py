@@ -9667,7 +9667,7 @@ def cmd_init(args):
     ]
     for loc in schema_locations:
         if loc.exists():
-            schema_sql = loc.read_text()
+            schema_sql = loc.read_text(encoding="utf-8")
             break
 
     try:
