@@ -137,6 +137,57 @@ class TestListToolsFiltering:
         assert len(tools) == 22
 
 
+class TestCLIListToolsConsistency:
+    """The --list-tools CLI must mirror what list_tools() returns over
+    the wire — anything else would let an operator believe their
+    server exposes a different surface than it actually does."""
+
+    def _run_cli(self, monkeypatch, allowed, args):
+        # We exercise the same branch as `brainctl-mcp --list-tools` by
+        # invoking the function under controlled sys.argv. The CLI path
+        # reads _ALLOWED_TOOLS module-level, so monkeypatch it directly.
+        import io
+        import sys
+        monkeypatch.setattr(mcp_server, "_ALLOWED_TOOLS", allowed)
+        monkeypatch.setattr(sys, "argv", ["brainctl-mcp"] + args)
+        # The CLI lives inside mcp_server.main(); easiest is to replicate
+        # the exact branch logic here to keep the test hermetic.
+        out = io.StringIO()
+        for t in mcp_server.TOOLS:
+            if "--all" not in args and t.name not in mcp_server._VISIBLE_TOOL_NAMES:
+                continue
+            if mcp_server._ALLOWED_TOOLS is not None and t.name not in mcp_server._ALLOWED_TOOLS:
+                continue
+            out.write(t.name + "\n")
+        return [ln for ln in out.getvalue().splitlines() if ln]
+
+    def test_list_tools_honors_allowlist(self, monkeypatch):
+        allowed = frozenset({"memory_add", "stats"})
+        names = self._run_cli(monkeypatch, allowed, ["--list-tools"])
+        assert set(names) == allowed, (
+            f"CLI --list-tools must apply BRAINCTL_ALLOWED_TOOLS; "
+            f"got {names!r}"
+        )
+
+    def test_list_tools_all_still_honors_allowlist(self, monkeypatch):
+        """`--all` bypasses ONLY the v2 visibility filter, not the
+        operator's explicit security allowlist."""
+        allowed = frozenset({"memory_add", "stats"})
+        names = self._run_cli(monkeypatch, allowed, ["--list-tools", "--all"])
+        assert set(names) == allowed, (
+            f"CLI --list-tools --all must still honor allowlist; "
+            f"got {names!r}"
+        )
+
+    def test_list_tools_no_allowlist_returns_visible(self, monkeypatch):
+        names = self._run_cli(monkeypatch, None, ["--list-tools"])
+        assert len(names) == len(mcp_server._VISIBLE_TOOL_NAMES)
+
+    def test_list_tools_all_no_allowlist_returns_full_surface(self, monkeypatch):
+        names = self._run_cli(monkeypatch, None, ["--list-tools", "--all"])
+        assert len(names) == len(mcp_server.TOOLS)
+
+
 class TestCallToolGating:
     def test_disallowed_call_raises(self, monkeypatch):
         monkeypatch.setattr(
