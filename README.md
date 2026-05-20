@@ -25,7 +25,7 @@ pip install brainctl
 Requires Python 3.11+. SQLite is built-in. No other mandatory dependencies.
 
 ```bash
-pip install brainctl[mcp]     # MCP server — 201 tools for Claude Desktop, Cursor, VS Code
+pip install brainctl[mcp]     # MCP server — 100 visible tools for Claude Desktop, Cursor, VS Code
 pip install brainctl[vec]     # vector similarity search (sqlite-vec + Ollama)
 pip install brainctl[signing] # Ed25519-signed memory exports + optional Solana on-chain pinning
 pip install brainctl[all]     # everything
@@ -72,6 +72,20 @@ brain.relate("OpenAI", "provides", "GPT-4o")
 - Compiled truth synthesis per entity (`brainctl entity compile <name>`)
 - 3-level enrichment tier; canonical alias dedup (`brainctl entity alias add`)
 - Spreading-activation recall across the graph (`brain.think(query)`)
+
+**Brain-region subsystems (v2.8.0)**
+
+`brainctl` models 27 brain regions / nuclei as first-class subsystems, each with its own schema, state, and event log. They cover the modulatory, attentional, motivational, mnemonic, and sensorimotor layers that real cognition runs on:
+
+- **Modulatory nuclei:** locus coeruleus (NE / phasic surprise gain), nucleus basalis (ACh / phasic attention), VTA-SNc (dopamine pathways), raphe (serotonin / horizon)
+- **Arousal / state:** ARAS (wake-sleep transitions), sleep architecture (REM/NREM cycles)
+- **Motivational gates:** habenula (negative-prediction "no-go"), septum (theta pacing)
+- **Memory mechanics:** hippocampus CA1+subiculum (mismatch detection / output), memory aging (synaptic tagging-and-capture, Frey & Morris), mammillary (Papez circuit transit)
+- **Workspace:** workspace bandwidth (global-workspace throttling), connectome (inter-region graph)
+- **Sensorimotor:** colliculi (orienting), olfactory (single-trial valence imprinting), claustrum (multimodal binding)
+- **Pre-existing (2.x):** basal ganglia, cerebellum, thalamus, amygdala, hippocampal subfields, ACC, DMN, drives, insula, PFC, entorhinal grid cells
+
+Every subsystem speaks the same dispatcher protocol (`subsystem_status`, `subsystem_emit`, `subsystem_register`, `subsystem_history`, `subsystem_configure`), so an agent that learned the shape for LC already knows how to drive raphe or claustrum. Schemas live in `db/migrations/067-082` (this release) plus the earlier brain-region migrations.
 
 **Belief revision (AGM)**
 - Belief set per agent with confidence weights
@@ -141,7 +155,7 @@ Trading bots:
 | `plugins/octobot/` | OctoBot |
 | `plugins/coinbase-agentkit/` | Coinbase AgentKit |
 
-## MCP server (201 tools)
+## MCP server (100 visible tools, v2 surface)
 
 ```json
 {
@@ -153,7 +167,24 @@ Trading bots:
 }
 ```
 
-Add to `~/.claude/claude_desktop_config.json`, `~/.cursor/mcp.json`, or equivalent. Full tool list and a decision tree: [MCP_SERVER.md](MCP_SERVER.md).
+Add to `~/.claude/claude_desktop_config.json`, `~/.cursor/mcp.json`, or equivalent. Full tool list and decision tree: [MCP_SERVER.md](MCP_SERVER.md). v1→v2 name migration map: [docs/TOOL_MIGRATION_V2.md](docs/TOOL_MIGRATION_V2.md).
+
+As of 2.8.0, the public MCP surface is **100 visible tools** (370 registered internally). Tier-1 tools — `memory_add`, `memory_search`, `event_add`, `entity_*`, `agent_orient`, `agent_wrap_up`, `decision_add`, `handoff_add`, `trigger_*` — are called directly by name. Brain-region operations route through action-discriminated dispatchers:
+
+```jsonc
+// Discover what's available
+subsystem_list()                                  // 27 brain subsystems
+subsystem_list_actions(name="lc")                 // valid actions for LC
+
+// Then act
+subsystem_status(name="lc", agent_id="me")
+subsystem_emit(name="lc", action="fire",
+               payload={"trigger_name":"x", "surprise_magnitude":0.7})
+belief(action="collapse", payload={...})
+trust(action="show", payload={"agent_id":"me"})
+```
+
+The shape of the surface fits the ~100-tool cap that several MCP clients enforce (Google Antigravity, etc.) and cuts the system-prompt token cost from ~50k → ~12k. v1 tool names remain callable internally for backwards compatibility; only their visibility in `tools/list` changes.
 
 ## CLI reference
 
@@ -340,7 +371,8 @@ Every operation accepts `agent_id` for attribution. Agents share one `brain.db`.
 | [docs/AGENT_ONBOARDING.md](docs/AGENT_ONBOARDING.md) | Step-by-step agent integration guide |
 | [docs/AGENT_INSTRUCTIONS.md](docs/AGENT_INSTRUCTIONS.md) | Copy-paste blocks for MCP, CLI, Python agents |
 | [docs/SIGNED_EXPORTS.md](docs/SIGNED_EXPORTS.md) | Bundle format, threat model, verify-without-brainctl recipe |
-| [MCP_SERVER.md](MCP_SERVER.md) | 201 tools with decision tree |
+| [MCP_SERVER.md](MCP_SERVER.md) | 100 visible tools + dispatcher decision tree |
+| [docs/TOOL_MIGRATION_V2.md](docs/TOOL_MIGRATION_V2.md) | v1→v2 tool-name migration map (used after 2.8.0 upgrade) |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Technical deep-dive |
 
 ## License

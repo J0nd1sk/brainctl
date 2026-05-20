@@ -26,7 +26,7 @@ Research basis: public docs, GitHub repos, and release notes as of April 2026. R
 | **Ed25519-signed exports** | ✓ | — | — | — | — | — | — |
 | **on-chain attestation (Solana)** | ✓ (opt-in) | — | — | — | — | — | — |
 | **managed non-custodial wallet** | ✓ | — | — | — | — | — | — |
-| **MCP server included** | ✓ (201 tools) | ✓ | ✓ | ✓ | ✓ | ? | — |
+| **MCP server included** | ✓ (100 visible tools, 370 registered) | ✓ | ✓ | ✓ | ✓ | ? | — |
 | **first-party framework plugins** | 16 | ? | ? | — | — | ? | — |
 | **session handoffs** | ✓ | — | ✓ (memory blocks) | — | — | ? | — |
 | **prospective memory (triggers)** | ✓ | — | — | — | — | ? | — |

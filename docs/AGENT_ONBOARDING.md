@@ -259,12 +259,62 @@ Relevant env vars:
 | `BRAINCTL_MCP_IDLE_TIMEOUT_SEC` | `0` (disabled) | Self-terminate after this many seconds of no MCP requests. Accepts `0` (disabled) or any value `>= 60`; 1–59 clamps up to 60. Set only when running under a parent that keeps idle pipes alive indefinitely. |
 | `BRAINCTL_MCP_PARENT_POLL_SEC`  | `5`  | How often the parent-death check runs. Min 1. |
 | `BRAINCTL_MCP_DISABLE_WATCHDOG` | unset | Set to `1` to disable the watchdog thread entirely (skips both parent-death and idle reaping). |
-| `BRAINCTL_ALLOWED_TOOLS` | unset (all 201 tools exposed) | Comma-separated list of tool names. When set, `tools/list` only returns those tools and `tools/call` rejects the rest. Required for clients that cap the total MCP tool count (e.g. Google's Antigravity IDE at 100). Unknown names hard-fail at startup with a `difflib` "did you mean?" hint. |
+| `BRAINCTL_ALLOWED_TOOLS` | unset (all 100 visible v2 tools exposed) | Comma-separated list of tool names. When set, `tools/list` only returns those tools and `tools/call` rejects the rest. Validation happens at startup against the visible v2 surface; v1-deprecated names (any of the 270 hidden tools — see `docs/TOOL_MIGRATION_V2.md`) hard-fail with a migration hint instead of silently shrinking the surface to zero. Unknown names get a `difflib` "did you mean?" suggestion. Required for clients that cap the total MCP tool count (e.g. Google's Antigravity IDE at 100). |
 
 The parent-death detection is the load-bearing safety net; leave it on
 in production. The idle timeout is only useful for explicit
 operator-driven cleanup of stuck idle processes — most users should
 leave it at the default (`0`).
+
+## v2 MCP tool surface (post-2026-05-20 / v2.8.0)
+
+As of v2.8.0 the MCP surface is **100 visible tools** (370 registered internally). v1 tool names like `lc_fire`, `belief_collapse`, `trust_show`, `handoff_consume` are hidden from `tools/list` and replaced by action-discriminated dispatchers. The underlying Python functions are unchanged — only the public addressability is different.
+
+### Four tiers
+
+1. **Primary (call by name as before).** `memory_add`, `memory_search`, `vsearch`, `search`, `event_add`, `event_search`, `entity_create`, `entity_get`, `entity_observe`, `entity_relate`, `entity_search`, `decision_add`, `handoff_add`, `handoff_latest`, `trigger_create`, `trigger_check`, `agent_orient`, `agent_wrap_up`, `agent_register`, `procedure_add/get/list/search`, `affect_*`, `reason`, `infer`, `infer_pretask`, `infer_gapfill`, `think`, `reconsolidate`, `reconsolidation_check`, `promote`, `free_energy_check`, `pagerank`, `health`, `stats`, `validate`, `lint`, `backup`, `dream_cycle`, `abstract_summarize`, `zoom_in`, `zoom_out`, `push`, `push_report`, `wallet_*`, `weights`, `whosknows`.
+2. **Subsystem dispatchers (7 tools).** Cover all 27 brain regions. Uniform call pattern: `subsystem_emit(name=..., action=..., payload={...})`.
+3. **Topic dispatchers (22 tools).** `belief`, `tom`, `trust`, `reflexion`, `gaps`, `federated`, `world`, `workspace`, `temporal`, `consolidation`, `expertise`, `neuro`, `meb`, `quarantine`, `epoch`, `usage`, `schedule`, `task`, `policy`, `knowledge`, `context`, `lifecycle`. Pattern: `topic(action=..., payload={...})`.
+4. **Admin dispatchers (6 tools).** `entity_admin`, `memory_admin`, `agent_admin`, `handoff_admin`, `trigger_admin`, `procedure_admin`. Wrap rarely-called `*_list`, `*_consume`, `*_expire`, `*_aliases`, `*_merge`, etc.
+
+### Discovery flow
+
+When you don't know what actions a subsystem accepts, ask first:
+
+```jsonc
+subsystem_list()                               // all 27 subsystems + layers
+subsystem_list_actions(name="lc")              // valid actions, kinds, fields for LC
+```
+
+Then act:
+
+```jsonc
+subsystem_status(name="lc", agent_id="me")
+subsystem_emit(name="lc", action="fire",
+               payload={"trigger_name":"x", "surprise_magnitude":0.7})
+subsystem_register(name="lc", kind="trigger",
+                   payload={"name":"my_trigger", "source_table":"events", ...})
+subsystem_history(name="lc", filters={"recent":50})
+subsystem_configure(name="lc", field="set_mode", payload={"mode":"tonic_high"})
+```
+
+### v1 → v2 cheat sheet
+
+| v1 (hidden from list_tools, still callable) | v2 (call this instead) |
+|---|---|
+| `lc_fire(trigger_name="x", surprise_magnitude=0.7)` | `subsystem_emit(name="lc", action="fire", payload={...})` |
+| `nb_status(agent_id="me")` | `subsystem_status(name="nb", agent_id="me")` |
+| `belief_collapse(...)` | `belief(action="collapse", payload={...})` |
+| `trust_show(agent_id="me")` | `trust(action="show", payload={"agent_id":"me"})` |
+| `handoff_consume(id=42)` | `handoff_admin(action="consume", payload={"id":42})` |
+| `trigger_list(status="active")` | `trigger_admin(action="list", payload={"status":"active"})` |
+| `lifecycle_summary(agent_id="me", days=30)` | `lifecycle(action="summary", payload={"agent_id":"me", "days":30})` |
+
+Full mapping in `docs/TOOL_MIGRATION_V2.md`. v1 names called via `tools/call` (rather than discovered through `tools/list`) still reach the same underlying function — the migration is opt-in for clients.
+
+### Brain regions (27 subsystems)
+
+The 16 brain regions added in v2.8.0 (LC, NB, ARAS, habenula, hippocampus CA1+sub, workspace bandwidth, connectome, sleep architecture, VTA/SNc, septum theta, raphe, memory aging, claustrum, colliculi, mammillary, olfactory) join the 11 already in the codebase (basal ganglia, cerebellum, thalamus, amygdala, hippocampal subfields, ACC, DMN, drives, insula, PFC, entorhinal). Every subsystem speaks the same dispatcher protocol, so a single mental model covers the whole set. Read `docs/proposals/` for the per-subsystem design memos.
 
 ## Common Patterns
 
