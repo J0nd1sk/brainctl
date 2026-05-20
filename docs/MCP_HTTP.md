@@ -26,7 +26,7 @@ and python-json-logger in addition to the MCP SDK itself.
 | Variable                      | Required | Default   | Notes |
 |-------------------------------|----------|-----------|-------|
 | `BRAINCTL_HTTP_TOKEN`         | yes      | —         | Static bearer token. Must be ≥32 chars. Boot fails loudly otherwise. |
-| `BRAINCTL_HTTP_ALLOWED_TOOLS` | yes      | —         | Comma-separated list of MCP tool names exposed over HTTP. `tools/list` is filtered to this set; `tools/call` on any other name returns JSON-RPC `-32601`. |
+| `BRAINCTL_HTTP_ALLOWED_TOOLS` | no       | visible v2 surface (100 tools) | Comma-separated list of MCP tool names exposed over HTTP. When unset, defaults to the full visible v2 surface — `tools/list` returns the same 100 tools the stdio transport does. When set, must contain only visible v2 tool names; v1-deprecated names (`lc_fire`, `belief_collapse`, etc.) hard-fail at boot with a `docs/TOOL_MIGRATION_V2.md` hint, the same as the stdio `BRAINCTL_ALLOWED_TOOLS`. `tools/call` on any name outside the resolved set returns JSON-RPC `-32601`. Per-request `allowed_tools` from the client (xAI Grok, Strand, etc.) narrows further on top of this. |
 | `BRAINCTL_HTTP_PORT`          | no       | `8080`    | TCP port. |
 | `BRAINCTL_HTTP_HOST`          | no       | `0.0.0.0` | Bind address. |
 | `BRAINCTL_HTTP_LOG_LEVEL`     | no       | `info`    | `debug` / `info` / `warning` / `error` / `critical`. |
@@ -39,10 +39,15 @@ configured.
 Either via the console script or uvicorn directly:
 
 ```bash
+# Minimal — defaults to the full 100-tool v2 surface
 export BRAINCTL_HTTP_TOKEN=$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')
+brainctl-mcp-http
+
+# Or narrow the surface server-side
 export BRAINCTL_HTTP_ALLOWED_TOOLS=memory_search,memory_add,entity_search
 brainctl-mcp-http
-# or:
+
+# Or via uvicorn:
 # uvicorn "agentmemory.mcp_http:create_app" --factory --port 8080
 ```
 
@@ -82,6 +87,61 @@ CMD ["brainctl-mcp-http"]
 Set `BRAINCTL_HTTP_TOKEN` as a secret in the platform's secret manager
 (`fly secrets set`, `gh secret set`, etc.) — never bake it into the
 image.
+
+## Connecting to xAI Grok (remote MCP)
+
+xAI's Grok models support remote MCP servers via Streaming HTTP. The
+`brainctl-mcp-http` transport is wire-compatible — point Grok at the
+deployed URL with the bearer token. Grok-side `allowed_tools` (or
+`allowed_tool_names` in the xAI SDK) narrows further on top of
+whatever `BRAINCTL_HTTP_ALLOWED_TOOLS` already restricts to.
+
+```python
+from xai_sdk import Client
+from xai_sdk.chat import user
+from xai_sdk.tools import mcp
+
+client = Client(api_key=os.environ["XAI_API_KEY"])
+chat = client.chat.create(
+    model="grok-4.3",
+    tools=[mcp(
+        server_url="https://brainctl-mcp.your-domain/mcp",
+        authorization=f"Bearer {os.environ['BRAINCTL_HTTP_TOKEN']}",
+        # Optional Grok-side narrowing. Omit to let Grok see the
+        # full server-exposed surface (which is the 100-tool v2
+        # default if you didn't set BRAINCTL_HTTP_ALLOWED_TOOLS):
+        allowed_tool_names=[
+            "agent_orient", "agent_wrap_up",
+            "memory_add", "memory_search", "vsearch",
+            "entity_create", "entity_search", "entity_observe",
+            "decision_add", "event_add",
+            "subsystem_emit", "subsystem_status",
+        ],
+    )],
+)
+chat.append(user("Recap my last brainctl session and what's still open."))
+for response, chunk in chat.stream():
+    print(chunk.content or "", end="", flush=True)
+```
+
+OpenAI-compatible Responses API:
+
+```python
+client.responses.create(
+    model="grok-4.3",
+    input=[{"role": "user", "content": "..."}],
+    tools=[{
+        "type": "mcp",
+        "server_url": "https://brainctl-mcp.your-domain/mcp",
+        "server_label": "brainctl",
+        "authorization": f"Bearer {os.environ['BRAINCTL_HTTP_TOKEN']}",
+    }],
+)
+```
+
+Spec: <https://docs.x.ai/docs/guides/tools/remote-mcp-tools>. The
+server URL must be reachable from the public internet — for local
+dev use a tunnel (Cloudflare Tunnel, ngrok, etc.).
 
 ## Security notes
 
