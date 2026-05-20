@@ -6285,6 +6285,44 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
         and "decisions" not in tables
     ):
         tables = list(set(tables) | {"memories", "events", "context", "decisions"})
+
+    # Issue #116 Phase 1-B: motivational entry gate. Compute the suppression
+    # list from the active profile + classified intent. In shadow mode
+    # (default) the list is only logged into the pathway log. In enforce
+    # mode (BRAINCTL_MOTIVATIONAL_GATE_ENFORCE=1) it removes the suppressed
+    # tables from `tables` and zeros out temporal expansion.
+    _mg_suppressed: list[str] = []
+    try:
+        from agentmemory.motivational_gate import (
+            compute_suppressions as _mg_compute,
+            apply_suppressions as _mg_apply,
+            is_enforce_enabled as _mg_enforce_on,
+        )
+        _mg_intent = (
+            _intent_result.intent if _intent_result is not None else None
+        )
+        _mg_profile = getattr(args, "profile", None)
+        _mg_suppressed = _mg_compute(
+            profile=_mg_profile, intent_label=_mg_intent
+        )
+        if _mg_suppressed and _mg_enforce_on():
+            _temporal_in = getattr(args, "temporal_expand_hours", None)
+            tables, _temporal_out = _mg_apply(
+                _mg_suppressed,
+                tables=tables,
+                temporal_expand_hours=_temporal_in,
+            )
+            if _temporal_out != _temporal_in:
+                # Only override when the gate actually adjusts the value;
+                # otherwise leave the caller's setting untouched.
+                try:
+                    setattr(args, "temporal_expand_hours", _temporal_out)
+                except Exception:
+                    pass
+    except Exception:  # pragma: no cover — defensive
+        # Gate must never break search. Empty suppression on any failure.
+        _mg_suppressed = []
+
     _query_plan = None
     _query_plan_dict = None
     try:
@@ -7556,6 +7594,7 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
             ),
             intent_label=_rpl_intent_label,
             active_profile=getattr(args, "profile", None),
+            suppressed_strategies=_mg_suppressed or None,
             embedding_model_version=f"{EMBED_MODEL}:{EMBED_DIMENSIONS}",
             latency_ms=_rpl_latency_ms,
             benchmark_mode=benchmark_mode,

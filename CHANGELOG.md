@@ -53,11 +53,64 @@ not in any indexed field. This release closes that gap.
   schema, emission, kill switch, missing-table degradation, and the
   table_distribution helper.
 
-Phase 1-B (motivational entry gate composition) and Phase 1-C
-(smooth sigmoid read-gate threshold) are planned follow-ups.
-Phase 4 enforcement readiness review is gated on accumulating 4+
-weeks of pathway data before deciding whether the BG/cerebellum
-loops are calibrated enough to flip from shadow to enforcement.
+Phase 1-C (smooth sigmoid read-gate threshold) is the remaining
+planned follow-up. Phase 4 enforcement readiness review is gated
+on accumulating 4+ weeks of pathway data before deciding whether
+the BG/cerebellum loops are calibrated enough to flip from shadow
+to enforcement.
+
+### Added — issue #116 Phase 1-B: motivational entry gate (shadow)
+
+Composes the active search profile and the classified intent label
+into a declarative suppression list of retrieval strategies that
+the memo (issue #116 §2.4) argues are categorically incompatible
+with the current task context. Strategy taxonomy adapted to
+brainctl's actual retrieval features:
+
+- ``procedural_lookup`` — search the `procedures` table
+- ``episodic_association`` — search the `events` table
+- ``temporal_chain_traversal`` — apply `--temporal-expand-hours`
+
+Profile suppressions (`writing`, `research`, `meeting`, `ops`,
+`networking`) and intent suppressions (`entity_lookup`,
+`decision_rationale`, `historical_timeline`, `task_status`,
+`how_to`, `troubleshooting`) compose by union — both signals add to
+the suppression list, neither overrides.
+
+Default mode is **shadow**: `cmd_search` computes the suppression
+list and writes it into `retrieval_pathway_log.suppressed_strategies`
+but does **not** modify retrieval behavior. Flips to **enforce**
+mode via `BRAINCTL_MOTIVATIONAL_GATE_ENFORCE=1`, at which point
+suppressed tables are removed from the fetch list and suppressed
+feature flags are zeroed before retrieval runs. Always preserves at
+least one table — the gate never starves retrieval of all candidates.
+
+- **`agentmemory.motivational_gate`** — new module exposing
+  `PROFILE_SUPPRESSIONS`, `INTENT_SUPPRESSIONS`, `compute_suppressions(...)`,
+  `apply_suppressions(...)`, `is_enforce_enabled()`. Pure functions,
+  no DB access, no side effects.
+
+- **`cmd_search` hookpoint** — computed early (after intent
+  classification, before the query planner runs) so the suppression
+  list is available for both the pathway log emission and, in
+  enforce mode, the table fetch. Failures swallow to an empty list
+  so a broken gate cannot break search.
+
+- **Tests** — `tests/test_motivational_gate.py`. 11 tests covering
+  profile-only, intent-only, composition, empty/unknown inputs,
+  table removal, temporal-expansion zeroing, safety floor
+  (never empties tables), no-op-when-empty, enforce env-var parsing,
+  and a sanity check that all mapping values resolve to known
+  strategies.
+
+- **Pathway log integration** — `cmd_search` now passes the
+  suppression list to `emit_pathway_log` via the existing
+  `suppressed_strategies` parameter, populating the column reserved
+  in migration 066. The pathway log thus captures shadow-mode gate
+  decisions for later calibration.
+
+Phase 1-C (smooth sigmoid read-gate threshold) is the remaining
+planned follow-up before the Phase 4 enforcement readiness review.
 
 ## [2.7.0] — 2026-05-13 — *Procedural memory layer (Velamj, PR #94)*
 
