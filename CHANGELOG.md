@@ -5,6 +5,45 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.8.0] — 2026-05-20 — *16 brain subsystems + v2 MCP tool surface (PR #138)*
+
+This release lands the issue #116 brain-architecture work and consolidates
+the MCP tool surface to fit harness caps. Supersedes overnight PRs
+#120–#137 as a single coherent artifact.
+
+### Added — 16 brain-region / nucleus subsystems (Phase 1)
+
+Migrations **067–082** introduce schemas + dispatch for: locus coeruleus
+(phasic NE), nucleus basalis (phasic ACh + `bg_modulators.acetylcholine`),
+ARAS (arousal / sleep-wake), habenula (negative prediction), hippocampus
+CA1 + subiculum, workspace bandwidth, connectome, sleep architecture,
+VTA / SNc dopamine pathways, septum theta, raphe, memory aging
+(synaptic tagging-and-capture, Frey & Morris), claustrum, colliculi,
+mammillary (Papez circuit), and olfactory. Each ships with an
+`mcp_tools_*.py` module, a design proposal in `docs/proposals/`, and a
+matching pytest module.
+
+### Added — Windows CI smoke
+
+`test-windows (3.12)` job verifies `brainctl init` + core test subset on
+`windows-latest`. Continue-on-error today; promotion to required after
+2–3 green PRs.
+
+### Fixed — UTF-8 read for SQL files (Windows hardening)
+
+`Path.read_text(encoding="utf-8")` explicit on every SQL-ingest site
+(`_impl.py`, `brain.py`, `migrate.py` ×3). Previously the system locale
+encoding was used, which crashed on em-dashes / arrows / γ in
+`init_schema.sql` on Windows cp1252 locales.
+
+### Fixed — fresh `brainctl init` includes every migration
+
+`init_schema.sql` now contains migrations 067–082 inlined, and `cmd_init`
+calls `migrate.run()` after `executescript()` as defense in depth.
+`acetylcholine` is declared inline in the `bg_modulators` CREATE TABLE
+to avoid a SQLite-version-dependent backfill quirk that left the column
+NULL on CI Linux SQLite 3.31.
+
 ### Changed — MCP tool surface v2 (hard cutover, 370 → 100 visible)
 
 **Breaking change.** Consolidated the public MCP tool surface from 370
