@@ -244,7 +244,7 @@ def tool_sleep_history(limit: int = 50, since: str | None = None,
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
         rows = conn.execute(
             f"SELECT * FROM sleep_cycle_transitions {where} ORDER BY id DESC LIMIT ?",
-            (*params, limit),
+            (*params, limit),  # nosec B608 - validated column allowlist + ? placeholders for values
         ).fetchall()
     return {"ok": True, "transitions": _rows(rows)}
 

@@ -5,6 +5,102 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed — MCP tool surface v2 (hard cutover, 370 → 100 visible)
+
+**Breaking change.** Consolidated the public MCP tool surface from 370
+named tools to **100 visible** by routing through 35 action-discriminated
+dispatchers. v1 tool functions are untouched and still callable internally
+(reverting the filter restores the v1 surface).
+
+Why:
+- Many MCP harnesses cap at ~100 visible tools.
+- 370 tool descriptions burned ~50k tokens of system-prompt overhead
+  before any agent work began. v2 cuts that to ~12k tokens.
+- The 16 brain regions shipped tonight (LC, NB, ARAS, Habenula, VTA,
+  Raphe, septum, claustrum, colliculi, mammillary, olfactory, CA1+Sub,
+  sleep, memory_aging, workspace_bandwidth, connectome) duplicated the
+  shape of 11 already-shipped regions. Tools were redundant at the
+  shape level even when the payloads were distinct.
+
+New visible surface:
+- **Primary (60 tools)** — memory_*, event_*, entity_*, agent_orient/
+  wrap_up/register, handoff_add/latest, trigger_create/check, search,
+  vsearch, pagerank, decision_add, procedure_add/get/list/search,
+  affect_*, reason/infer/think, reconsolidate, promote, free_energy_check,
+  health/stats/validate/lint/backup, dream_cycle, abstract_summarize,
+  zoom_in/out, push, wallet_create/show, weights, whosknows.
+- **Subsystem dispatchers (7 tools)** — subsystem_list, subsystem_status,
+  subsystem_list_actions, subsystem_emit, subsystem_register,
+  subsystem_history, subsystem_configure. Cover 27 brain subsystems.
+- **Topic dispatchers (22 tools)** — belief, tom, trust, reflexion,
+  gaps, federated, world, workspace, temporal, consolidation, expertise,
+  neuro, meb, quarantine, epoch, usage, schedule, task, policy,
+  knowledge, context, lifecycle.
+- **Admin dispatchers (6 tools)** — entity_admin, memory_admin,
+  agent_admin, handoff_admin, trigger_admin, procedure_admin.
+
+Hidden (still callable internally): 270 v1 tool names — full list at
+`mcp_tools_consolidated.py:DEPRECATED_TOOL_NAMES`.
+
+Migration: `docs/TOOL_MIGRATION_V2.md` has the full old→new mapping.
+Common pattern: `lc_fire(...)` → `subsystem_emit(name="lc", action="fire", payload={...})`.
+
+Rollback: remove the `_VISIBLE_TOOL_NAMES = _ALL_TOOL_NAMES - _V2_DEPRECATED`
+filter in `mcp_server.py:list_tools` and the v1 surface returns immediately.
+Or `git revert` the consolidation commit. The underlying Python tool
+functions are untouched in every case.
+
+Measured impact:
+- Visible tool count: 260 → 100
+- Tool description tokens in system prompt: ~40k → ~12k
+- `list_tools()` response time: <1ms (negligible change)
+- Cold-start import: ~340ms (no change vs. v1)
+- `tests/bench/run --check`: P@1=0.60 / P@5=0.18 / Recall@5=0.51 (zero delta)
+
+### Added — 16 new brain-region / subsystem Phase 1s (overnight 2026-05-20)
+
+Migrations 067-082 + their MCP tools (now accessed via `subsystem_*`
+dispatchers — see v2 consolidation entry above). Each is Phase 1
+inspection-only / additive — no behavior change to retrieval or
+existing subsystems.
+
+- **Migration 067** — Locus Coeruleus (NE source / +surprise broadcaster).
+  Codex-authored under orchestration.
+- **Migration 068** — Nucleus Basalis (ACh / attention broadcaster).
+  Adds `acetylcholine` column to `bg_modulators` (4th dial).
+- **Migration 069** — ARAS (global arousal / 6-stage sleep-wake state).
+- **Migration 070** — Habenula (anti-reward / negative-PE channel).
+- **Migration 071** — Hippocampus CA1 + Subiculum (trisynaptic loop
+  completion; match/mismatch + cortical bridge).
+- **Migration 072** — Workspace bandwidth limit (top-K-per-epoch on
+  workspace_broadcasts).
+- **Migration 073** — Connectome graph (22-node inter-subsystem comm
+  graph; bg_modulators is the top-degree hub).
+- **Migration 074** — Sleep architecture (5-stage state machine with
+  per-stage permitted_operations CSV).
+- **Migration 075** — VTA/SNc (DA source nucleus + pathway catalog).
+- **Migration 076** — Septum + theta rhythm (4-8 Hz pacemaker, 8 bins
+  per cycle, phase-lock tracking).
+- **Migration 077** — Raphe nuclei (5-HT source; DRN + MRN subtypes).
+- **Migration 078** — Memory aging (synaptic tagging-and-capture;
+  tag at write, capture-within-window or demote).
+- **Migration 079** — Claustrum (cross-modal retrieval binding;
+  9 modalities catalogued).
+- **Migration 080** — Colliculi (SC + IC orienting reflex;
+  novel-pattern triggers).
+- **Migration 081** — Mammillary Bodies + Papez circuit (episodic
+  consolidation transit log).
+- **Migration 082** — Olfactory cortex (direct sensory-emotional
+  imprints; bypasses thalamus, Proust effect).
+
+Plus the issue #116 Phase 1-A pathway log (migration 066), sigmoid
+read-gate (`agentmemory.sigmoid_gate`), motivational entry gate
+(`agentmemory.motivational_gate`), and the research-avenues memo at
+`research/autonomous-research-avenues-2026-05-20.md`.
+
+Test totals: 141 new test cases across 16 modules, all green. Bench
+harness (`tests/bench/run --check`) confirms zero retrieval regression.
+
 ### Added — issue #116 Phase 1-A: retrieval pathway log
 
 External architecture memo (issue #116, "Thalamus, Basal Ganglia, and

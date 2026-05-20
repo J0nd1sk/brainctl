@@ -8,7 +8,7 @@ Published as `brainctl` on PyPI (v2.2.1+, current 2.4.10).
 ## Key Paths
 - **DB:** `db/brain.db` (WAL mode, foreign keys ON, 59 user-facing tables, 49 numbered migrations + one unnumbered V2-4 quantum-schema file). The numbered sequence has an intentional gap at 050 — the V2-4 quantum schema (`db/migrations/quantum_schema_migration_sqlite.sql`) occupies that slot without a number because it was applied ad-hoc during the V2-4 rollout and pre-dates the idempotent runner fix in 2.4.8. The runner only picks up files matching `^\d+_.+\.sql$` so the quantum file is a no-op for `brainctl migrate` on fresh installs — apply manually if you need the quantum columns on a new DB. (Audit I28 — 2026-04-19.)
 - **CLI:** `bin/brainctl` — main CLI entry
-- **MCP server:** canonical entry is `agentmemory.mcp_server:run` (201 tools across `mcp_server.py` + 29 `mcp_tools_*.py` modules). Installed as the `brainctl-mcp` console script via pip. The legacy standalone `bin/brainctl-mcp` only registers a subset and is being phased out.
+- **MCP server:** canonical entry is `agentmemory.mcp_server:run`. As of v2 surface consolidation (2026-05-20): **100 visible tools** (370 registered internally; 270 hidden behind action-discriminated dispatchers). Installed as the `brainctl-mcp` console script via pip. See `MCP_SERVER.md` for the tool reference and `docs/TOOL_MIGRATION_V2.md` for v1→v2 migration. The legacy standalone `bin/brainctl-mcp` only registers a subset and is being phased out.
 - **Bench:** `bin/brainctl-bench` — retrieval eval harness (P@k / MRR / nDCG@k regression gate, fixtures under `tests/bench/`)
 - **Source:** `src/agentmemory/` — Python package
 - **Config:** `config/` — quiet hours, consolidation schedules
@@ -19,10 +19,59 @@ Published as `brainctl` on PyPI (v2.2.1+, current 2.4.10).
 pip install -e .                                      # dev install
 brainctl stats                                        # verify DB
 brainctl search "test"                                # test search
-python3 -m agentmemory.mcp_server --list-tools        # full 199-tool MCP surface
+python3 -m agentmemory.mcp_server --list-tools        # 100-tool v2 MCP surface
 python3 -m tests.bench.run                            # retrieval quality benchmark
 python3 -m tests.bench.run --check                    # fail on >2% regression vs baseline
 ```
+
+## MCP tool surface (v2, post-2026-05-20 consolidation)
+
+100 visible tools split into four tiers:
+
+- **Primary (call by name):** `memory_add`, `memory_search`, `vsearch`,
+  `search`, `event_add`, `event_search`, `entity_create`, `entity_get`,
+  `entity_search`, `entity_observe`, `entity_relate`, `decision_add`,
+  `handoff_add`, `handoff_latest`, `trigger_create`, `trigger_check`,
+  `agent_orient`, `agent_wrap_up`, `agent_register`,
+  `procedure_add/get/list/search`, `affect_*`, `reason`, `infer`,
+  `infer_pretask`, `infer_gapfill`, `think`, `reconsolidate`,
+  `reconsolidation_check`, `promote`, `free_energy_check`,
+  `pagerank`, `health`, `stats`, `validate`, `lint`, `backup`,
+  `dream_cycle`, `abstract_summarize`, `zoom_in`, `zoom_out`, `push`,
+  `push_report`, `wallet_*`, `weights`, `whosknows`.
+- **Subsystem dispatchers** (`subsystem_list`, `subsystem_status`,
+  `subsystem_emit`, `subsystem_register`, `subsystem_history`,
+  `subsystem_configure`, `subsystem_list_actions`): cover all 27 brain
+  regions (LC, NB, ARAS, Habenula, VTA, Raphe, septum, claustrum,
+  colliculi, mammillary, olfactory, CA1, sleep, memory_aging,
+  workspace_bandwidth, connectome, BG, cerebellum, thalamus, amygdala,
+  hippocampus, ACC, DMN, drives, insula, PFC, entorhinal).
+- **Topic dispatchers:** `belief`, `tom`, `trust`, `reflexion`, `gaps`,
+  `federated`, `world`, `workspace`, `temporal`, `consolidation`,
+  `expertise`, `neuro`, `meb`, `quarantine`, `epoch`, `usage`,
+  `schedule`, `task`, `policy`, `knowledge`, `context`, `lifecycle`.
+- **Admin dispatchers:** `entity_admin`, `memory_admin`, `agent_admin`,
+  `handoff_admin`, `trigger_admin`, `procedure_admin`.
+
+**Call pattern for dispatchers:**
+```jsonc
+// Discover first
+subsystem_list()                        // all 27 subsystems + layers
+subsystem_list_actions(name="lc")       // valid actions for LC
+
+// Then act
+subsystem_status(name="lc", agent_id="...")
+subsystem_emit(name="lc", action="fire", payload={trigger_name: "x", surprise_magnitude: 0.7})
+subsystem_configure(name="lc", field="set_mode", payload={mode: "tonic_high"})
+
+belief(action="get", payload={...})
+trust(action="calibrate", payload={...})
+entity_admin(action="merge", payload={...})
+```
+
+If you call a v1 name (e.g. `lc_status`, `belief_collapse`, `trust_show`),
+the MCP server returns "Unknown tool" with a suggestion. Migration table
+in `docs/TOOL_MIGRATION_V2.md`.
 
 ## Architecture
 - Tables: memories, events, entities, decisions, context, knowledge_edges, affect_log, access_log, agent_state, agent_beliefs

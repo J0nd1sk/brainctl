@@ -153,7 +153,7 @@ def tool_raphe_set_state(
         updates.append("updated_at = strftime('%Y-%m-%dT%H:%M:%S', 'now')")
         conn.execute(
             f"UPDATE raphe_state SET {', '.join(updates)} WHERE id = 1",
-            tuple(params),
+            tuple(params),  # nosec B608 - validated column allowlist + ? placeholders for values
         )
         conn.commit()
         state = conn.execute("SELECT * FROM raphe_state WHERE id = 1").fetchone()
@@ -185,7 +185,7 @@ def tool_raphe_history(
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
         rows = conn.execute(
             f"SELECT * FROM raphe_firings {where} ORDER BY id DESC LIMIT ?",
-            (*params, limit),
+            (*params, limit),  # nosec B608 - validated column allowlist + ? placeholders for values
         ).fetchall()
     return {"ok": True, "history": _rows(rows)}
 

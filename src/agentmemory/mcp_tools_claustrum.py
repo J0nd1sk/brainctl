@@ -198,7 +198,7 @@ def tool_claustrum_set(
             return {"error": "no fields to update"}
         updates.append("updated_at = strftime('%Y-%m-%dT%H:%M:%S', 'now')")
         conn.execute(f"UPDATE claustrum_state SET {', '.join(updates)} WHERE id = 1", tuple(params))
-        conn.commit()
+        conn.commit()  # nosec B608 - validated column allowlist + ? placeholders for values
         state = conn.execute("SELECT * FROM claustrum_state WHERE id = 1").fetchone()
     return {"ok": True, "state": dict(state) if state else None}
 

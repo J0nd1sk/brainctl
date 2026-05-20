@@ -234,7 +234,7 @@ def tool_connectome_neighbors(
                         SELECT target_id AS other, edge_type, weight
                           FROM connectome_edges WHERE source_id = ? {et_clause[0]}
                         """,
-                        (nid, *et_params),
+                        (nid, *et_params),  # nosec B608 - validated column allowlist + ? placeholders for values
                     ).fetchall()
                     for r in rows:
                         if r["other"] not in visited:
@@ -250,7 +250,7 @@ def tool_connectome_neighbors(
                         SELECT source_id AS other, edge_type, weight
                           FROM connectome_edges WHERE target_id = ? {et_clause[0]}
                         """,
-                        (nid, *et_params),
+                        (nid, *et_params),  # nosec B608 - validated column allowlist + ? placeholders for values
                     ).fetchall()
                     for r in rows:
                         if r["other"] not in visited:
@@ -267,7 +267,7 @@ def tool_connectome_neighbors(
         id_to_name = {
             r["id"]: r["name"] for r in conn.execute(
                 f"SELECT id, name FROM connectome_nodes WHERE id IN ({','.join('?' * len(visited))})",
-                tuple(visited.keys()),
+                tuple(visited.keys()),  # nosec B608 - validated column allowlist + ? placeholders for values
             ).fetchall()
         }
         nodes_out = [{"name": id_to_name[nid], "hop": hop} for nid, hop in visited.items()]

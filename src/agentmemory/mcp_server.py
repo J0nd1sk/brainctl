@@ -43,33 +43,48 @@ try:
         mcp_tools_allostatic,
         mcp_tools_amygdala,
         mcp_tools_analytics,
+        mcp_tools_aras,
         mcp_tools_dmem,
         mcp_tools_basal_ganglia,
         mcp_tools_belief_merge,
         mcp_tools_beliefs,
         mcp_tools_cerebellum,
+        mcp_tools_claustrum,
+        mcp_tools_colliculi,
+        mcp_tools_connectome,
+        mcp_tools_consolidated,  # v2 dispatcher surface
         mcp_tools_consolidation,
         mcp_tools_dmn,
         mcp_tools_drives,
         mcp_tools_entorhinal_grid,
         mcp_tools_expertise,
         mcp_tools_federation,
+        mcp_tools_habenula,
         mcp_tools_health,
         mcp_tools_hippocampal_subfields,
+        mcp_tools_hippocampus_ca1,
         mcp_tools_immunity,
         mcp_tools_insula,
         mcp_tools_knowledge,
         mcp_tools_lifecycle,
+        mcp_tools_locus_coeruleus,
+        mcp_tools_mammillary,
         mcp_tools_meb,
+        mcp_tools_memory_aging,
         mcp_tools_merge,
         mcp_tools_neuro,
+        mcp_tools_nucleus_basalis,
+        mcp_tools_olfactory,
         mcp_tools_pfc,
         mcp_tools_policy,
         mcp_tools_procedural,
+        mcp_tools_raphe,
         mcp_tools_reasoning,
         mcp_tools_reconcile,
         mcp_tools_reflexion,
         mcp_tools_scheduler,
+        mcp_tools_septum_theta,
+        mcp_tools_sleep_architecture,
         mcp_tools_telemetry,
         mcp_tools_temporal,
         mcp_tools_temporal_abstraction,
@@ -77,7 +92,9 @@ try:
         mcp_tools_tom,
         mcp_tools_trust,
         mcp_tools_usage,
+        mcp_tools_vta_snc,
         mcp_tools_workspace,
+        mcp_tools_workspace_bandwidth,
         mcp_tools_world,
     )
     _EXT_MODULES = [
@@ -86,33 +103,50 @@ try:
         mcp_tools_allostatic,
         mcp_tools_amygdala,
         mcp_tools_analytics,
+        mcp_tools_aras,
         mcp_tools_dmem,
         mcp_tools_basal_ganglia,
         mcp_tools_belief_merge,
         mcp_tools_beliefs,
         mcp_tools_cerebellum,
+        mcp_tools_claustrum,
+        mcp_tools_colliculi,
+        mcp_tools_connectome,
+        mcp_tools_consolidated,  # v2 dispatcher surface — listed last so it
+                                  # registers AFTER everything else and so its
+                                  # DISPATCH includes everyone
         mcp_tools_consolidation,
         mcp_tools_dmn,
         mcp_tools_drives,
         mcp_tools_entorhinal_grid,
         mcp_tools_expertise,
         mcp_tools_federation,
+        mcp_tools_habenula,
         mcp_tools_health,
         mcp_tools_hippocampal_subfields,
+        mcp_tools_hippocampus_ca1,
         mcp_tools_immunity,
         mcp_tools_insula,
         mcp_tools_knowledge,
         mcp_tools_lifecycle,
+        mcp_tools_locus_coeruleus,
+        mcp_tools_mammillary,
         mcp_tools_meb,
+        mcp_tools_memory_aging,
         mcp_tools_merge,
         mcp_tools_neuro,
+        mcp_tools_nucleus_basalis,
+        mcp_tools_olfactory,
         mcp_tools_pfc,
         mcp_tools_policy,
         mcp_tools_procedural,
+        mcp_tools_raphe,
         mcp_tools_reasoning,
         mcp_tools_reconcile,
         mcp_tools_reflexion,
         mcp_tools_scheduler,
+        mcp_tools_septum_theta,
+        mcp_tools_sleep_architecture,
         mcp_tools_telemetry,
         mcp_tools_temporal,
         mcp_tools_temporal_abstraction,
@@ -120,7 +154,9 @@ try:
         mcp_tools_tom,
         mcp_tools_trust,
         mcp_tools_usage,
+        mcp_tools_vta_snc,
         mcp_tools_workspace,
+        mcp_tools_workspace_bandwidth,
         mcp_tools_world,
     ]
 except ImportError as _e:
@@ -3150,6 +3186,19 @@ def _invoke_dispatch_fn(fn, agent_id: str, arguments: dict):
 
 _ALL_TOOL_NAMES: frozenset[str] = frozenset(t.name for t in TOOLS)
 
+# v2 tool-surface consolidation: hide deprecated v1 named tools from
+# list_tools while leaving their DISPATCH entries callable internally.
+# The consolidated dispatchers in mcp_tools_consolidated.py replace them.
+# To roll back: revert this file's filter + delete mcp_tools_consolidated.py.
+try:
+    from agentmemory.mcp_tools_consolidated import (
+        DEPRECATED_TOOL_NAMES as _V2_DEPRECATED,
+    )
+except ImportError:
+    _V2_DEPRECATED = frozenset()
+
+_VISIBLE_TOOL_NAMES: frozenset[str] = _ALL_TOOL_NAMES - _V2_DEPRECATED
+
 
 def _resolve_allowed_tools() -> frozenset[str] | None:
     """Read BRAINCTL_ALLOWED_TOOLS at startup. Returns None when unset
@@ -3190,9 +3239,13 @@ _ALLOWED_TOOLS: frozenset[str] | None = _resolve_allowed_tools()
 @app.list_tools()
 async def list_tools() -> list[Tool]:
     _lifecycle.touch_activity()
+    # v2: filter out deprecated v1 tools (consolidated into the
+    # mcp_tools_consolidated dispatchers). Their underlying callables
+    # stay registered in DISPATCH for internal use.
+    visible = [t for t in TOOLS if t.name in _VISIBLE_TOOL_NAMES]
     if _ALLOWED_TOOLS is None:
-        return TOOLS
-    return [t for t in TOOLS if t.name in _ALLOWED_TOOLS]
+        return visible
+    return [t for t in visible if t.name in _ALLOWED_TOOLS]
 
 
 @app.call_tool()

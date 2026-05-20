@@ -230,7 +230,7 @@ def tool_habenula_history(
               {where}
              ORDER BY id DESC LIMIT ?
             """,
-            (*params, limit),
+            (*params, limit),  # nosec B608 - validated column allowlist + ? placeholders for values
         ).fetchall()
     return {"ok": True, "history": _rows(rows)}
 

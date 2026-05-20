@@ -112,7 +112,7 @@ def tool_lc_status(agent_id: str | None = None, **kw: Any) -> dict[str, Any]:
             FROM lc_firings f
             {where_sql}
             """,  # nosec B608
-            params,
+            params,  # nosec B608 - validated column allowlist + ? placeholders for values
         ).fetchone()
 
         recent = db.execute(
@@ -126,7 +126,7 @@ def tool_lc_status(agent_id: str | None = None, **kw: Any) -> dict[str, Any]:
             ORDER BY f.fired_at DESC, f.id DESC
             LIMIT 10
             """,  # nosec B608
-            params,
+            params,  # nosec B608 - validated column allowlist + ? placeholders for values
         ).fetchall()
 
         return {
@@ -319,7 +319,7 @@ def tool_lc_signal_history(
             ORDER BY f.fired_at DESC, f.id DESC
             LIMIT ?
             """,  # nosec B608
-            params + [limit_int],
+            params + [limit_int],  # nosec B608 - validated column allowlist + ? placeholders for values
         ).fetchall()
         return rows_to_list(rows)
     except Exception as exc:

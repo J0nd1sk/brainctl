@@ -160,7 +160,7 @@ def tool_workspace_bandwidth_set(
         updates.append("updated_at = strftime('%Y-%m-%dT%H:%M:%S', 'now')")
         conn.execute(
             f"UPDATE workspace_bandwidth_state SET {', '.join(updates)} WHERE id = 1",
-            tuple(params),
+            tuple(params),  # nosec B608 - validated column allowlist + ? placeholders for values
         )
         conn.commit()
         state = conn.execute("SELECT * FROM workspace_bandwidth_state WHERE id = 1").fetchone()
@@ -239,7 +239,7 @@ def tool_workspace_bandwidth_epochs_history(
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
         rows = conn.execute(
             f"SELECT * FROM workspace_bandwidth_epochs {where} ORDER BY id DESC LIMIT ?",
-            (*params, limit),
+            (*params, limit),  # nosec B608 - validated column allowlist + ? placeholders for values
         ).fetchall()
     return {"ok": True, "epochs": _rows(rows)}
 

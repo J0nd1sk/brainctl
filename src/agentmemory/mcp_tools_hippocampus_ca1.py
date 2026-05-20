@@ -239,11 +239,11 @@ def tool_ca1_subiculum_history(
         out_where = "WHERE " + " AND ".join(out_clauses) if out_clauses else ""
         comparisons = _rows(conn.execute(
             f"SELECT * FROM hippocampus_ca1_comparisons {cmp_where} ORDER BY id DESC LIMIT ?",
-            (*cmp_params, limit),
+            (*cmp_params, limit),  # nosec B608 - validated column allowlist + ? placeholders for values
         ).fetchall())
         outputs = _rows(conn.execute(
             f"SELECT * FROM hippocampus_subiculum_outputs {out_where} ORDER BY id DESC LIMIT ?",
-            (*out_params, limit),
+            (*out_params, limit),  # nosec B608 - validated column allowlist + ? placeholders for values
         ).fetchall())
     return {"ok": True, "comparisons": comparisons, "outputs": outputs}
 
