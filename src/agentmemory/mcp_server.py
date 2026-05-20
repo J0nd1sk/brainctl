@@ -3478,9 +3478,17 @@ async def main():
         return
 
     if "--list-tools" in sys.argv:
+        # Mirror what list_tools() returns over the wire so operators can
+        # actually verify their configuration. `--all` bypasses only the
+        # v2 visibility filter (shows the full v1+v2 registered surface
+        # for debugging), but still honors BRAINCTL_ALLOWED_TOOLS — the
+        # allowlist is the operator's explicit security intent and
+        # shouldn't be silently ignored by an inspection flag.
         show_all = "--all" in sys.argv
         for t in TOOLS:
             if not show_all and t.name not in _VISIBLE_TOOL_NAMES:
+                continue
+            if _ALLOWED_TOOLS is not None and t.name not in _ALLOWED_TOOLS:
                 continue
             print(f"  {t.name}: {t.description[:80]}")
         return
