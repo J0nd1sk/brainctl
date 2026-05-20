@@ -65,6 +65,20 @@ class TestResolveAllowedTools:
         assert "not_a_real_tool" in msg
         assert "BRAINCTL_ALLOWED_TOOLS" in msg
 
+    def test_v1_deprecated_name_hard_exits(self, monkeypatch):
+        """Post-v2: an allowlist containing only v1-deprecated names
+        would silently empty the visible surface. Hard-fail instead, so
+        a stale Antigravity / harness allowlist surfaces during start
+        rather than presenting as a broken zero-tool client."""
+        deprecated_sample = next(iter(mcp_server._V2_DEPRECATED))
+        monkeypatch.setenv("BRAINCTL_ALLOWED_TOOLS", deprecated_sample)
+        with pytest.raises(SystemExit) as exc_info:
+            mcp_server._resolve_allowed_tools()
+        msg = str(exc_info.value)
+        assert deprecated_sample in msg
+        assert "deprecated" in msg.lower()
+        assert "TOOL_MIGRATION_V2" in msg
+
     def test_typo_gets_did_you_mean_suggestion(self, monkeypatch):
         """memory-add (hyphen) should suggest memory_add (underscore)."""
         monkeypatch.setenv("BRAINCTL_ALLOWED_TOOLS", "memory-add")
@@ -84,10 +98,16 @@ class TestResolveAllowedTools:
 
 
 class TestListToolsFiltering:
-    def test_unset_returns_full_surface(self, monkeypatch):
+    def test_unset_returns_visible_surface(self, monkeypatch):
+        """When the allowlist is unset, list_tools returns the post-v2
+        VISIBLE surface (v1 deprecated names are hidden by the
+        consolidation filter)."""
         monkeypatch.setattr(mcp_server, "_ALLOWED_TOOLS", None)
         tools = asyncio.run(mcp_server.list_tools())
-        assert len(tools) == len(mcp_server.TOOLS)
+        # Post-v2: visible count is len(TOOLS) - len(_V2_DEPRECATED ∩ _ALL_TOOL_NAMES).
+        # Pre-v2 (rollback): visible == TOOLS (no filter).
+        expected = len(getattr(mcp_server, "_VISIBLE_TOOL_NAMES", mcp_server._ALL_TOOL_NAMES))
+        assert len(tools) == expected
 
     def test_allowlist_filters_surface(self, monkeypatch):
         allowlist = frozenset({"memory_add", "memory_search", "event_add", "stats"})
@@ -97,12 +117,18 @@ class TestListToolsFiltering:
         assert names == allowlist
 
     def test_antigravity_subset_fits_under_100_cap(self, monkeypatch):
+        """Antigravity (and other harnesses with a 100-tool cap) need a
+        minimal-but-useful allowlist. Post-v2, two former v1 names in
+        this set (handoff_consume, trigger_list) live behind admin
+        dispatchers and are no longer in the visible surface — call
+        handoff_admin(action='consume', ...) and trigger_admin(
+        action='list', ...) instead."""
         antigravity_set = frozenset({
             "memory_add", "memory_search", "search", "event_add",
             "event_search", "entity_create", "entity_get", "entity_observe",
             "entity_relate", "entity_search", "decision_add", "handoff_add",
-            "handoff_latest", "handoff_consume", "trigger_create",
-            "trigger_list", "trigger_check", "stats", "agent_orient",
+            "handoff_latest", "handoff_admin", "trigger_create",
+            "trigger_admin", "trigger_check", "stats", "agent_orient",
             "agent_wrap_up", "validate", "lint",
         })
         monkeypatch.setattr(mcp_server, "_ALLOWED_TOOLS", antigravity_set)

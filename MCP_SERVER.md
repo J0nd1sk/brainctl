@@ -50,174 +50,195 @@ docker run -v ~/.agentmemory:/data -e BRAIN_DB=/data/brain.db brainctl
 The `CMD` defaults to `brainctl-mcp`, so the container runs the MCP
 server over stdio.
 
-## Available Tools (260)
+## Available Tools (100)
 
-| Tool | Description |
-|------|-------------|
-| `memory_add` | Add a durable memory with W(m) worthiness gate |
-| `memory_search` | Full-text search across memories |
+brainctl exposes **100 tools** in v2 — a consolidation that cut the
+surface from 370 named tools to ~100 by routing through action-
+discriminated dispatchers. The full underlying functionality is
+preserved; agents call generic dispatchers like
+`subsystem_emit(name='lc', action='fire', payload={...})` instead of
+the v1 `lc_fire(...)`.
+
+Why: many MCP harnesses cap at ~100 tools, and ~370 tool descriptions
+in every system prompt was burning ~50k tokens before any agent work
+began. v2 cuts that to ~12k tokens.
+
+### Tier 1: Primary tools (call directly by name)
+
+These are the daily-use surfaces. Call them by their exact name.
+
+**Store / look up information:**
+| Tool | Purpose |
+|---|---|
+| `memory_add` | Add a durable memory (W(m) worthiness gate) |
+| `memory_search` | Hybrid FTS+vector search across memories |
+| `vsearch` | Pure vector search (cosine over embeddings) |
+| `search` | Cross-table search (memories + events + entities) |
+| `search_patterns` | Pattern-based retrieval |
 | `event_add` | Log a timestamped event |
-| `event_search` | Search events by text, type, or project |
-| `entity_create` | Create a typed entity (person, project, tool, concept) |
-| `entity_get` | Get an entity by name or ID with all relations |
+| `event_search` | Search events by text / type / project |
+| `event_link` | Link two events causally |
+| `decision_add` | Record a decision with rationale |
+| `entity_create` | Create a typed entity (person / project / tool / concept) |
+| `entity_get` | Get an entity by name or ID with relations |
 | `entity_search` | Full-text search across entities |
 | `entity_observe` | Add atomic observations to an entity |
-| `entity_relate` | Create a directed relation between two entities |
-| `trigger_create` | Create a prospective memory trigger |
-| `trigger_list` | List triggers, optionally filtered by status |
-| `trigger_check` | Check if triggers match a query |
-| `trigger_update` | Update fields on an existing trigger |
-| `trigger_delete` | Cancel/delete a trigger by ID |
-| `decision_add` | Record a decision with rationale |
-| `handoff_add` | Create a structured handoff packet |
-| `handoff_latest` | Fetch the latest matching handoff packet |
-| `handoff_consume` | Mark a handoff packet consumed |
-| `handoff_pin` | Pin a handoff packet for preservation |
-| `handoff_expire` | Mark a handoff packet expired |
-| `search` | Cross-table search (memories + events + entities) |
-| `pagerank` | Compute PageRank centrality over knowledge graph |
-| `stats` | Database statistics and health summary |
-| `resolve_conflict` | AGM credibility-weighted belief conflict resolution |
-| `belief_collapse` | Belief collapse mechanics and coherence checking |
-| `access_log_annotate` | Annotate access log with task outcomes |
-| `affect_classify` | Classify affect from text (zero LLM cost) |
-| `affect_log` | Classify affect and store in affect_log |
-| `affect_check` | Check current affect state for an agent |
-| `affect_monitor` | Fleet-wide affect scan across all agents |
-| `replay_boost` | Manually boost a memory's replay_priority for consolidation scheduling |
-| `replay_queue` | List top consolidation candidates sorted by replay_priority |
-| `reconsolidation_check` | Check if a memory is in its lability window (opened by high-PE retrieval) |
-| `reconsolidate` | Merge new content into a labile memory (agent-scoped write window) |
-| `consolidation_stats` | Replay queue depth, labile count, ripple event totals |
-| `memory_calibration` | Per-category Brier-score calibration, staleness, coverage gaps (metacognition) |
-| `attention_snapshot` | Synthesize agent attention state from recent searches and events |
-| `consolidation_run` | Run SWR-driven consolidation pass: promote episodic→semantic, mine causal chains |
-| `free_energy_check` | Epistemic drive and knowledge gap summary from agent_uncertainty_log |
-| `quarantine_list` | List memories under immunity review with reason and contradiction evidence |
-| `quarantine_review` | Mark a quarantined memory safe, malicious, or uncertain |
-| `quarantine_purge` | Permanently delete a malicious memory and retract derived beliefs |
-| `consolidation_schedule` | Predict memories likely to be needed soon and store forecasts |
-| `allostatic_prime` | Boost replay_priority for pending forecasts before demand arrives |
-| `demand_forecast` | Show consolidation forecasts with signal_source and confidence |
-| `memory_promote` | Promote a CONSTRUCT_ONLY memory to FULL_EVOLUTION (embed + FTS index) |
-| `tier_stats` | Show write-tier distribution (full/construct) for an agent |
-| `abstract_summarize` | Create an extractive summary memory at session/day/week/month/quarter level |
-| `zoom_out` | Given a memory, return its parent summaries in the temporal hierarchy |
-| `zoom_in` | Given a summary memory, return its constituent child memories |
-| `temporal_map` | Count breakdown of memories at each temporal level for an agent |
-
-## Which Tools Do I Need?
-
-201 tools is overwhelming. Most agents need ~15 on a daily basis. Here's how to find what you need.
-
-### Tier 1: Essential (daily use)
-
-**Store information:**
-- Durable fact/lesson/convention: `memory_add` (enforces W(m) write gate)
-- What just happened: `event_add` (timestamped, no gate)
-- Why a choice was made: `decision_add` (with rationale)
-- Working state for next session: `handoff_add`
-
-**Find information:**
-- Everything about a topic: `search` (memories + events + entities)
-- Just memories: `memory_search` (supports category, scope, pagerank_boost)
-- Just events: `event_search` (supports event_type, project)
-- A specific entity: `entity_get`
-- Entities matching a query: `entity_search`
-
-**Track entities:**
-- New entity: `entity_create`
-- New fact about entity: `entity_observe`
-- Link two entities: `entity_relate`
+| `entity_relate` | Create a directed relation between entities |
+| `procedure_add` / `procedure_get` / `procedure_list` / `procedure_search` | Procedural memory (workflows / recipes) |
+| `push` | Push a memory to another agent's inbox |
+| `push_report` | Report on push deliveries |
 
 **Session continuity:**
-- Set a future reminder: `trigger_create`
-- Check reminders: `trigger_check`
-- Resume prior work: `handoff_latest` / `handoff_consume`
+| Tool | Purpose |
+|---|---|
+| `agent_orient` | Resume from prior session (loads handoff + recent events + top memories) |
+| `agent_wrap_up` | End a session — logs handoff for the next one |
+| `agent_register` | Register an agent in brain.db |
+| `handoff_add` | Create a structured handoff packet |
+| `handoff_latest` | Fetch the latest matching handoff packet |
+| `trigger_create` / `trigger_check` | Prospective memory triggers |
 
-**Health:**
-- Database overview: `stats`
-- Schema integrity: `validate`
-- Quality lint: `lint`
+**Affect:**
+| Tool | Purpose |
+|---|---|
+| `affect_classify` | Classify affect from text (zero LLM cost) |
+| `affect_log` | Classify + store in affect_log |
+| `affect_check` | Check current affect for an agent |
+| `affect_monitor` | Fleet-wide affect scan |
 
-### Tier 2: Advanced (weekly/as-needed)
+**Reasoning / inference:**
+| Tool | Purpose |
+|---|---|
+| `reason` | Mid-task structured reasoning |
+| `infer` | One-shot inference |
+| `infer_pretask` | Pre-task hypothesis generation |
+| `infer_gapfill` | Fill knowledge gaps via inference |
+| `think` | Long-form deliberation log |
 
-| Category | Tools | When to use |
-|----------|-------|-------------|
-| Consolidation | `consolidation_run`, `replay_boost`, `replay_queue` | Memory maintenance |
-| Reconsolidation | `reconsolidation_check`, `reconsolidate` | Lability window mechanics |
-| Beliefs & Conflicts | `resolve_conflict`, `belief_collapse` | When memories contradict |
-| Temporal Abstraction | `abstract_summarize`, `zoom_out`, `zoom_in`, `temporal_map` | Hierarchical summarization |
-| Allostatic Scheduling | `consolidation_schedule`, `allostatic_prime`, `demand_forecast` | Predictive memory pre-loading |
-| Immunity | `quarantine_list`, `quarantine_review`, `quarantine_purge` | Poisoned memory handling |
-| D-MEM | `memory_promote`, `tier_stats` | Write-tier management |
-| Metacognition | `memory_calibration`, `attention_snapshot`, `free_energy_check` | Self-monitoring |
-| Affect | `affect_classify`, `affect_log`, `affect_check`, `affect_monitor` | Emotional state tracking |
-| Thalamus (Phase 1+2, shadow gate) | `thalamus_status`, `thalamus_salience`, `thalamus_relay_create`, `thalamus_gate_set`, `thalamus_burst`, `thalamus_mode_set`, `thalamus_shadow_stats` | Typed routing layer + integrated salience scoring + shadow-mode gate consult on every W(m) write (see `docs/proposals/thalamus.md`) |
-| Basal Ganglia (Phase 1+2+3 + holds + cascade) | `bg_status`, `bg_action_register`, `bg_modulator_set`, `bg_td_emit`, `bg_shadow_stats`, `bg_sweep_traces`, `bg_weights_show`, `bg_hold_trigger`, `bg_hold_release`, `bg_holds_active` | Five parallel loops + opponent Go/NoGo learning from real outcomes (three-factor rule) + dispatch shadow + outcome→δ wired into `outcome_annotate` + hyperdirect holds + cascade to thalamus (see `docs/proposals/basal_ganglia.md`) |
-| Cerebellum (Phase 1+2+3, predict/observe + auto-wire) | `cerebellum_status`, `cerebellum_module_register`, `cerebellum_predict`, `cerebellum_observe` | Forward-model layer per cortical partner (motor/oculomotor/dlpfc/lofc/acc) × 3 prediction kinds. Marr-Albus sparse expansion + supervised LTD update. Boundary markers fire on \|δ_forward\|≥0.5 → workspace broadcasts + BG TD-error bus. Auto-wired into MCP dispatch. Confidence → thalamus salience precision (see `docs/proposals/cerebellum.md`) |
-| Amygdala (Phase 1, valence tagging) | `amygdala_status`, `amygdala_tag`, `amygdala_query_valence`, `amygdala_extinguish` | Rapid one-shot valence/threat tagging per entity/agent/context. Saturating tanh update caps single-event movement at ±0.5 (anti-PTSD). Reconsolidation: query opens 1h labile window where next tag uses 4× learning rate. Extinction = context-keyed inhibitory overlay (ITC-analog), not erasure (see `docs/proposals/amygdala.md`) |
-| Hippocampal subfields (Phase 1, DG/CA3 audit) | `hippocampus_dg_separate`, `hippocampus_dg_check`, `hippocampus_ca3_complete`, `hippocampus_subfields_status` | DG pattern-separation at write time + CA3 pattern-completion at retrieval, audit-only in Phase 1. Decisions: deduplicate (sim≥0.97), separate (sim≥0.85), passthrough (sim<0.85) |
-| ACC (Phase 1, in-flight conflict) | `acc_evaluate`, `acc_status`, `acc_predict`, `acc_resolve` | Real-time conflict + surprise + EVC scoring for write ops. Botvinick co-activation + Brown/PRO prediction-error + Shenhav cost-of-control. Fires BG holds on high EVC |
-| DMN (Phase 1, offline simulation) | `dmn_simulate`, `dmn_validate`, `dmn_speculative_list`, `dmn_schedule_status` | Counterfactual rollouts (Schacter constructive simulation). Speculative memories quarantined from default retrieval; graduate to `memories` only when validated against real events |
-| Drives / Hypothalamus (Phase 1, homeostatic) | `drive_sample`, `drive_status`, `drive_recommend_mode`, `drive_register` | 5 named drives (consolidation_debt, staleness, belief_coverage, pii_pressure, entity_freshness) with set-points. `pii_pressure` is a PAG-style safety drive |
-| Insula (Phase 1, interoception) | `insula_sample`, `insula_state`, `insula_subscribe`, `insula_check_triggers` | Self-state vector (write_pressure, retrieval_strain, consolidation_debt, embedding_health, attention_load, certainty) with EMA baseline + deviation. Subscriber registry routes signals to subsystems |
-| PFC sub-regions (Phase 1, named slots) | `pfc_slot_set`, `pfc_slot_get`, `pfc_status` | 4 named slots per agent: dlPFC (active task), vmPFC (outcome-utility), OFC (realized-outcome log), frontopolar (meta-monitor). Mostly aggregation |
-| Entorhinal grid (Phase 1, conceptual indexing) | `entorhinal_activate`, `entorhinal_lookup`, `entorhinal_status` | 48 grid cells across 3 scales (fine/medium/coarse). Deterministic hash maps content → cell activations; sub-linear pattern lookup |
+**Reconsolidation + lifecycle:**
+| Tool | Purpose |
+|---|---|
+| `reconsolidate` | Merge new content into a labile memory |
+| `reconsolidation_check` | Check if a memory is in its labile window |
+| `promote` | Promote a CONSTRUCT_ONLY memory to FULL_EVOLUTION |
+| `free_energy_check` | Epistemic drive + knowledge gap summary |
+| `retirement_analysis` | Decide which memories are ready to retire |
+| `retrieval_effectiveness` | Per-query retrieval quality |
+| `allostatic_prime` | Boost replay_priority for pending forecasts |
+| `demand_forecast` | Show consolidation forecasts |
 
-### Tier 3: Specialist (~150 tools)
+**Health / admin:**
+| Tool | Purpose |
+|---|---|
+| `health` | Database overview + integrity |
+| `stats` | Database statistics |
+| `validate` | Schema integrity check |
+| `lint` | Quality lint pass |
+| `backup` | Snapshot the brain.db |
+| `pagerank` | Compute PageRank centrality over the knowledge graph |
+| `weights` | Show memory-weighting state |
+| `whosknows` | Find which agents have memories on a topic |
+| `dream_cycle` | Run a dream-cycle pass |
+| `telemetry` | Server telemetry snapshot |
+| `write_gate_stats` | W(m) write-gate metrics |
+| `budget_set` / `budget_status` | Per-agent token-budget controls |
+| `wallet_create` / `wallet_show` | Solana wallet management for signed exports |
+| `resolve_conflict` | AGM credibility-weighted belief conflict resolution |
+| `merge_status` / `merge_execute` | Cross-store merge |
+| `abstract_summarize` / `zoom_in` / `zoom_out` | Temporal abstraction |
 
-The remaining tools cover specialized subsystems: Theory of Mind, Trust scoring, Neuromodulation, MEB (Memory Event Buffer), Expertise routing, Federation, Policy memory, Reasoning chains, Reflexion loops, Workspace management, World models, Analytics, Telemetry, and Usage tracking. These are documented in the individual `mcp_tools_*.py` source modules.
+### Tier 2: Subsystem dispatchers (`subsystem_*`)
 
-### Decision Tree
+Brain-region subsystems (LC, NB, ARAS, Habenula, VTA, Raphe, septum,
+BG, cerebellum, thalamus, amygdala, hippocampus, ACC, DMN, drives,
+insula, PFC, entorhinal, CA1, mammillary, claustrum, colliculi,
+olfactory, sleep, memory_aging, workspace_bandwidth, connectome) are
+accessed through 7 generic dispatchers:
 
+| Tool | Use |
+|---|---|
+| `subsystem_list` | Discoverability — list all 27 subsystems with layer + summary |
+| `subsystem_list_actions` | List valid emit actions / register kinds / configure fields for a subsystem |
+| `subsystem_status` | Current state + recent activity (replaces `*_status` × 27) |
+| `subsystem_emit` | Fire / record an event (replaces `*_fire`, `*_tag`, `*_transition`, `*_predict`, `*_observe`, etc.) |
+| `subsystem_register` | Idempotent UPSERT into a subsystem's catalog (replaces `*_register_*` × 12) |
+| `subsystem_history` | Paginated event/firing history (replaces `*_history`, `*_signal_history`) |
+| `subsystem_configure` | Update mode / state / config (replaces `*_set`, `*_set_mode`, `*_modulator_set`) |
+
+**Call pattern:**
+```jsonc
+// Always start with subsystem_list to learn what's available
+subsystem_list()
+// → { subsystems: [{name: "lc", layer: "neuromod_broadcast", ...}, ...] }
+
+// Then subsystem_list_actions for the one you want
+subsystem_list_actions(name="lc")
+// → { emit_actions: ["fire"], register_kinds: ["trigger"], configure_fields: ["set_mode"], ... }
+
+// Then call the appropriate dispatcher
+subsystem_emit(name="lc", action="fire", payload={
+    trigger_name: "cerebellum_high_pe",
+    surprise_magnitude: 0.7,
+    agent_id: "your-agent",
+})
 ```
-What do you need?
-|
-+-- Store something?
-|   +-- Durable fact ----------> memory_add
-|   +-- What just happened ----> event_add
-|   +-- Why a choice was made -> decision_add
-|   +-- State for next session > handoff_add
-|
-+-- Find something?
-|   +-- Broad topic search ----> search
-|   +-- Memories only ---------> memory_search
-|   +-- Events only -----------> event_search
-|   +-- Entity by name --------> entity_get
-|
-+-- Track an entity?
-|   +-- New entity ------------> entity_create
-|   +-- New fact about it -----> entity_observe
-|   +-- Link two entities -----> entity_relate
-|
-+-- Set a reminder? -----------> trigger_create
-+-- Check reminders? ----------> trigger_check
-+-- Resume prior work? --------> handoff_latest
-+-- Check system health? ------> stats / health / lint
-```
 
-## Environment Variables
+### Tier 3: Topic dispatchers (action-discriminated)
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `BRAIN_DB` | `~/agentmemory/db/brain.db` | Path to brain.db |
-| `BRAINCTL_OLLAMA_URL` | `http://localhost:11434/api/embed` | Ollama embedding endpoint |
-| `BRAINCTL_EMBED_MODEL` | `nomic-embed-text` | Embedding model name |
-| `BRAINCTL_EMBED_DIMENSIONS` | `768` | Embedding vector dimensions |
+| Tool | Replaces | Actions |
+|---|---|---|
+| `belief` | 12 belief_* / collapse_* | collapse, conflicts, conflicts_scan, consensus, diff, get, merge, propagate, seed, set, collapse_log, collapse_stats |
+| `tom` | 10 tom_* | belief_invalidate, belief_set, conflicts_list, conflicts_resolve, gap_scan, inject, perspective_get, perspective_set, status, update |
+| `trust` | 6 trust_* | audit, calibrate, decay, process_meb, show, update_contradiction |
+| `reflexion` | 6 reflexion_* | failure_recurrence, list, query, retire, success, write |
+| `gaps` | 4 gaps_* | list, refresh, resolve, scan |
+| `federated` | 4 federated_* | entity_search, memory_search, search, stats |
+| `world` | 6 world_* | agent, predict, project, resolve, status, rebuild_caps |
+| `workspace` | 6 workspace_* | ack, broadcast, history, ingest, phi, status |
+| `temporal` | 6 temporal_* | auto_detect, causes, chain, context, effects, map |
+| `consolidation` | 4 consolidation_* | events, run, schedule, stats |
+| `expertise` | 4 expertise_* | build, list, show, update |
+| `neuro` | 5 neuro_* + neurostate | detect, history, set, signal, status, state |
+| `meb` | 3 meb_* | prune, stats, tail |
+| `quarantine` | 3 quarantine_* | list, purge, review |
+| `epoch` | 3 epoch_* | create, detect, list |
+| `usage` | 4 usage_* | check, fleet, log, summary |
+| `schedule` | 3 schedule_* | run, set, status |
+| `task` | 3 task_* | add, list, update |
+| `policy` | 4 policy_* | add, feedback, list, match |
+| `knowledge` | 4 (knowledge_*, dreams, distill) | index, report, dreams, distill |
+| `context` | 2 context_* | add, search |
+| `lifecycle` | 5 (lifecycle_summary, decay_report, outcome_*, access_log_annotate) | summary, decay_report, outcome_annotate, outcome_report, outcome_report_annotate |
 
-## Agent Attribution
+### Tier 4: Admin dispatchers
 
-All tools accept an optional `agent_id` parameter. If omitted, defaults to
-`"mcp-client"`. Use this to distinguish which agent or user wrote each record.
+| Tool | Replaces | Actions |
+|---|---|---|
+| `entity_admin` | 9 entity_* admin tools (alias/merge/compile/etc.) | add_alias, alias, aliases, compile, cross_agent_view, duplicates_scan, merge, reconcile_report, tier |
+| `memory_admin` | 13 memory_* admin tools | calibration, attention_snapshot, replay_boost, replay_queue, hot, cold, promote, tier_stats, trust_propagate, utility_rate, suggest_category, pii, pii_scan |
+| `agent_admin` | 4 agent_* admin tools | activity, list, model, ping |
+| `handoff_admin` | 3 handoff_* admin tools (consume/expire/pin) | consume, expire, pin |
+| `trigger_admin` | 3 trigger_* admin tools (delete/list/update) | delete, list, update |
+| `procedure_admin` | 4 procedure_* admin tools (backfill/stats/update/feedback) | backfill, stats, update, feedback |
 
-## Shared Database
+### Migration from v1 named tools
 
-The MCP server and the `brainctl` CLI read and write the same `brain.db`.
-Use whichever interface fits your workflow — they are fully interchangeable.
+Old call → new call mapping lives in `docs/TOOL_MIGRATION_V2.md`. A few common ones:
 
-```bash
-# These are equivalent:
-# MCP tool:  memory_add(content="fact", category="convention", agent_id="myagent")
-# CLI:       brainctl -a myagent memory add "fact" -c convention
-```
+| v1 (deprecated) | v2 |
+|---|---|
+| `lc_status()` | `subsystem_status(name="lc")` |
+| `lc_fire(trigger_name="x", surprise_magnitude=0.7)` | `subsystem_emit(name="lc", action="fire", payload={trigger_name: "x", surprise_magnitude: 0.7})` |
+| `belief_collapse(...)` | `belief(action="collapse", payload={...})` |
+| `gaps_scan(...)` | `gaps(action="scan", payload={...})` |
+| `entity_merge(...)` | `entity_admin(action="merge", payload={...})` |
+
+### Rollback
+
+If anything breaks downstream, the consolidation can be reverted by
+removing the filter in `mcp_server.py:list_tools` (or simply reverting
+the v2 commit). The v1 tool functions are untouched — they remain in
+DISPATCH and become visible again the moment the filter is gone.
+
+The 16 new brain-region migrations (067-082) are append-only and have
+DROP TABLE rollback DDL in each migration file's header comment.

@@ -9667,7 +9667,7 @@ def cmd_init(args):
     ]
     for loc in schema_locations:
         if loc.exists():
-            schema_sql = loc.read_text()
+            schema_sql = loc.read_text(encoding="utf-8")
             break
 
     try:
@@ -9697,13 +9697,38 @@ def cmd_init(args):
         except Exception:
             pass  # Some tables may not exist in minimal schema
 
+        conn.close()
+
+        # Bring fresh DB up to HEAD by applying every pending numbered
+        # migration. init_schema.sql is a snapshot — it lags newest
+        # migrations by design (regenerating 2800+ lines on every
+        # migration release is a maintainer foot-gun). Migrations are
+        # idempotent (CREATE TABLE IF NOT EXISTS + the tolerant
+        # _apply_sql), so applying them here is safe whether or not the
+        # init_schema snapshot already contained their tables.
+        migrate_summary: dict | None = None
+        try:
+            from agentmemory import migrate as _mig
+            migrate_summary = _mig.run(str(target), dry_run=False, backup=False)
+        except Exception as exc:
+            # Migration failure on a fresh init should surface but not
+            # erase the DB. Doctor will catch downstream issues.
+            migrate_summary = {"ok": False, "error": str(exc)}
+
+        conn = sqlite3.connect(str(target))
         conn.row_factory = sqlite3.Row
         tables = [r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
         ).fetchall()]
         conn.close()
 
-        json_out({"ok": True, "path": str(target), "tables": len(tables), "table_list": tables})
+        json_out({
+            "ok": True,
+            "path": str(target),
+            "tables": len(tables),
+            "table_list": tables,
+            "migrations": migrate_summary,
+        })
         # Welcome message for interactive use
         if sys.stdout.isatty():
             print(f"\n  brain.db created at {target} ({len(tables)} tables)")

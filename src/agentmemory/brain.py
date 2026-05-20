@@ -166,7 +166,7 @@ class Brain:
             raise FileNotFoundError(f"init_schema.sql not found at {_INIT_SQL_PATH}")
 
         conn = sqlite3.connect(str(self.db_path))
-        conn.executescript(_INIT_SQL_PATH.read_text())
+        conn.executescript(_INIT_SQL_PATH.read_text(encoding="utf-8"))
         conn.execute(
             "INSERT OR IGNORE INTO workspace_config (key, value) VALUES ('enabled', '0')"
         )

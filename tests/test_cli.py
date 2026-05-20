@@ -50,9 +50,26 @@ class TestCLIStats:
         assert "active_memories" in data
 
     def test_stats_empty_db(self, cli_db):
+        """A fresh DB has zero *user* memories. After the 2026-05-20
+        fresh-init fix (brainctl init now applies all pending
+        migrations so new subsystem tables exist), migration 057's
+        scope='system' cerebellum sentinel memory is present. We
+        explicitly assert the user count excludes seeded sentinels."""
+        import sqlite3
         r = run_brainctl("stats", db_path=cli_db)
         data = json.loads(r.stdout)
-        assert data["memories"] == 0
+        # Count only non-system, non-seeded scopes.
+        conn = sqlite3.connect(str(cli_db))
+        try:
+            user_count = conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE scope != 'system'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert user_count == 0
+        # Stats total may include the system sentinel(s) — assert the
+        # delta is small enough to be obviously seed-only, not stale data.
+        assert data["memories"] <= 5
 
 
 # ── memory add ──────────────────────────────────────────────────────────────

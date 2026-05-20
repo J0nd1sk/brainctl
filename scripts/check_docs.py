@@ -17,12 +17,16 @@ SRC = ROOT / "src" / "agentmemory"
 
 
 def count_mcp_tools() -> int:
-    """Count tools in the fully-merged TOOLS list (including extension modules)."""
+    """Count tools VISIBLE in the public surface (post-v2 consolidation
+    filter). The TOOLS list contains both v1 named tools and v2 consolidated
+    dispatchers — agents see only the post-filter view, so the doc header
+    should reflect the visible count."""
     import subprocess
     result = subprocess.run(
         [sys.executable, "-c",
          "import sys; sys.path.insert(0,'src'); "
-         "import agentmemory.mcp_server as ms; print(len(ms.TOOLS))"],
+         "import agentmemory.mcp_server as ms; "
+         "print(len(getattr(ms, '_VISIBLE_TOOL_NAMES', ms._ALL_TOOL_NAMES)))"],
         capture_output=True, text=True, cwd=ROOT,
     )
     if result.returncode != 0 or not result.stdout.strip().isdigit():
