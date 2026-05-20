@@ -2837,3 +2837,1211 @@ VALUES
 
 INSERT OR IGNORE INTO lc_state (id, mode, ne_reservoir)
 VALUES (1, 'tonic_mid', 0.5);
+
+
+-- ============================================================================
+-- Migration 068_nucleus_basalis.sql (appended into init_schema for fresh-install parity)
+-- ============================================================================
+-- Migration 068: nucleus basalis subsystem — Phase 1 schema
+--
+-- Pairs with migration 067 (locus coeruleus). NB-ACh complements LC-NE
+-- as the dual gain/attention control axes the May 15 brain-region
+-- coverage audit explicitly flagged as missing.
+--
+-- LC fires on surprise (broadly); NB fires on attention shifts
+-- (target-locked). Both feed bg_modulators — LC writes lc_ne, NB
+-- writes a new acetylcholine column added by this migration.
+--
+-- Phase 1 is inspection-only / additive: schema + read+CRUD tools.
+-- No behavior change to retrieval, write gates, or any existing
+-- subsystem. Phase 2 (separate PR) wires NB into the shadow consult
+-- at mcp_server.py:3265 to fire on thalamic_salience above threshold.
+-- Phase 3 closes the loop. Phase 4 enforces.
+--
+-- Four biological invariants encoded here (see docs/proposals/nucleus_basalis.md):
+--   1. Basal-forebrain cholinergic projection is broad to cortex,
+--      target-modulated by attention.
+--   2. Phasic vs tonic ACh: phasic = target-locked spike,
+--      tonic = sustained baseline.
+--   3. ACh widens what's attended, narrows what's not.
+--   4. Firing on attention SHIFTS, not steady-state attention.
+--
+-- Rollback, if needed before live adoption:
+--   ALTER TABLE bg_modulators DROP COLUMN acetylcholine;  -- SQLite >= 3.35
+--   DROP TABLE IF EXISTS nb_state;
+--   DROP TABLE IF EXISTS nb_firings;
+--   DROP TABLE IF EXISTS nb_attention_targets;
+--   DELETE FROM schema_version WHERE version = 68;
+--
+-- IDEMPOTENT: IF NOT EXISTS guards object creation; seed rows use
+-- INSERT OR IGNORE so repeated application does not duplicate state.
+-- The ALTER TABLE ADD COLUMN uses IF NOT EXISTS (SQLite 3.35+, which
+-- brainctl already requires per migration 023's pattern).
+
+-- Catalog of channels NB can attend to. Seedable; new targets
+-- registered idempotently via tool_nb_register_target.
+CREATE TABLE IF NOT EXISTS nb_attention_targets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    channel_kind TEXT NOT NULL CHECK(channel_kind IN (
+        'thalamic_sector', 'agent_scope', 'intent_class', 'entity_type', 'other'
+    )),
+    default_ach_gain REAL NOT NULL DEFAULT 0.10 CHECK(default_ach_gain BETWEEN 0.0 AND 1.0),
+    description TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+    last_attended_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_nb_targets_kind ON nb_attention_targets(channel_kind);
+
+-- Log of NB firings (cholinergic broadcasts). Each row = one phasic
+-- ACh burst directed at a target.
+CREATE TABLE IF NOT EXISTS nb_firings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fired_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+    agent_id TEXT,
+    target_id INTEGER NOT NULL,
+    target_source_event_id INTEGER,
+    attention_magnitude REAL NOT NULL,
+    ach_delta_applied REAL NOT NULL,
+    mode TEXT NOT NULL CHECK(mode IN ('phasic', 'tonic_shift')),
+    context_hash TEXT,
+    notes TEXT,
+    FOREIGN KEY (target_id) REFERENCES nb_attention_targets(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_nb_firings_recent ON nb_firings(fired_at);
+CREATE INDEX IF NOT EXISTS idx_nb_firings_agent ON nb_firings(agent_id, fired_at);
+CREATE INDEX IF NOT EXISTS idx_nb_firings_target ON nb_firings(target_id, fired_at);
+
+-- Single-row reservoir + current attention focus.
+CREATE TABLE IF NOT EXISTS nb_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    mode TEXT NOT NULL DEFAULT 'tonic_mid' CHECK(mode IN (
+        'phasic_locked', 'tonic_high', 'tonic_mid', 'tonic_low'
+    )),
+    ach_reservoir REAL NOT NULL DEFAULT 0.5 CHECK(ach_reservoir BETWEEN 0.0 AND 1.0),
+    last_attended_target_id INTEGER,
+    last_phasic_at TEXT,
+    last_tonic_shift_at TEXT,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+    FOREIGN KEY (last_attended_target_id) REFERENCES nb_attention_targets(id)
+);
+INSERT OR IGNORE INTO nb_state (id, mode, ach_reservoir) VALUES (1, 'tonic_mid', 0.5);
+
+-- Seed the 4 thalamic sectors brainctl already uses (sourced from the
+-- thalamic_relays.sector enum in migration 050). Other channel kinds
+-- (agent_scope, intent_class, entity_type) get registered later via
+-- nb_register_target as the operator decides what to attend to.
+INSERT OR IGNORE INTO nb_attention_targets (name, channel_kind, default_ach_gain, description) VALUES
+    ('cognitive', 'thalamic_sector', 0.15, 'planning, reasoning, deliberation'),
+    ('episodic', 'thalamic_sector', 0.10, 'event recall and timeline'),
+    ('semantic', 'thalamic_sector', 0.08, 'concept / fact retrieval'),
+    ('pii_sensitive', 'thalamic_sector', 0.20, 'PII / credential / wallet — high attention so W(m) sees it');
+
+-- Extend bg_modulators with the 4th neuromod dial.
+-- Re-run safety: the brainctl migrate runner gates re-application by
+-- schema_version (this row gets the version=68 entry below), so the
+-- ALTER only fires once per DB. If you're applying the migration via
+-- raw sqlite3 against a brain.db that already has the column, this
+-- ALTER will fail with a duplicate-column error — that's by design;
+-- always go through `brainctl migrate` for live application.
+ALTER TABLE bg_modulators ADD COLUMN acetylcholine REAL NOT NULL DEFAULT 0.5;
+
+
+-- ============================================================================
+-- Migration 069_aras.sql (appended into init_schema for fresh-install parity)
+-- ============================================================================
+-- Migration 069: ascending reticular activating system — Phase 1 schema
+--
+-- The brainstem-level global arousal broadcast. Sits ABOVE LC + NB —
+-- ARAS gates whether the rest of the neuromod surface is responsive
+-- at all (anesthesia is functionally an ARAS shutdown; waking is
+-- ARAS ramping up).
+--
+-- Phase 1 is inspection-only / additive: schema + read+CRUD tools.
+-- Does not yet modulate LC/NB/retrieval. That's Phase 3.
+--
+-- Four biological invariants encoded:
+--   1. Tonic vs phasic separation (sustained drive + brief pulses).
+--   2. Discrete sleep/wake regimes (not just a scalar).
+--   3. Recovery from suppression takes time (last_transition_at).
+--   4. Event classes drive specific arousal deltas (seed catalog).
+--
+-- Rollback:
+--   DROP TABLE IF EXISTS aras_transitions;
+--   DROP TABLE IF EXISTS aras_state;
+--   DROP TABLE IF EXISTS aras_triggers;
+--   DELETE FROM schema_version WHERE version = 69;
+--
+-- IDEMPOTENT.
+
+CREATE TABLE IF NOT EXISTS aras_triggers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    trigger_kind TEXT NOT NULL CHECK(trigger_kind IN (
+        'novelty', 'threat', 'explicit_alert', 'consolidation_signal', 'idle_decay', 'other'
+    )),
+    default_arousal_delta REAL NOT NULL DEFAULT 0.05,
+    default_target_mode TEXT,
+    description TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_aras_triggers_kind ON aras_triggers(trigger_kind);
+
+CREATE TABLE IF NOT EXISTS aras_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    sleep_wake_mode TEXT NOT NULL DEFAULT 'awake_relaxed' CHECK(sleep_wake_mode IN (
+        'nrem_sleep', 'rem_sleep', 'drowsy', 'awake_relaxed', 'awake_focused', 'hyperalert'
+    )),
+    arousal_level REAL NOT NULL DEFAULT 0.5 CHECK(arousal_level BETWEEN 0.0 AND 1.0),
+    tonic_drive REAL NOT NULL DEFAULT 0.5 CHECK(tonic_drive BETWEEN 0.0 AND 1.0),
+    phasic_alertness REAL NOT NULL DEFAULT 0.0 CHECK(phasic_alertness BETWEEN 0.0 AND 1.0),
+    last_transition_at TEXT,
+    last_drive_at TEXT,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+);
+INSERT OR IGNORE INTO aras_state (id) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS aras_transitions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    transitioned_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+    agent_id TEXT,
+    from_mode TEXT NOT NULL,
+    to_mode TEXT NOT NULL,
+    reason TEXT,
+    trigger_id INTEGER,
+    arousal_before REAL,
+    arousal_after REAL,
+    notes TEXT,
+    FOREIGN KEY (trigger_id) REFERENCES aras_triggers(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_aras_transitions_recent ON aras_transitions(transitioned_at);
+CREATE INDEX IF NOT EXISTS idx_aras_transitions_agent ON aras_transitions(agent_id, transitioned_at);
+CREATE INDEX IF NOT EXISTS idx_aras_transitions_to_mode ON aras_transitions(to_mode, transitioned_at);
+
+INSERT OR IGNORE INTO aras_triggers (name, trigger_kind, default_arousal_delta, default_target_mode, description) VALUES
+    ('novel_query', 'novelty', 0.05, 'awake_focused', 'previously-unseen query pattern — gentle arousal nudge'),
+    ('high_pe_event', 'novelty', 0.10, 'awake_focused', 'cerebellum_predictions delta_forward above threshold'),
+    ('consolidation_complete', 'consolidation_signal', -0.10, 'drowsy', 'dream cycle finished — permits arousal taper'),
+    ('idle_30min', 'idle_decay', -0.05, 'drowsy', 'no agent activity for 30 min'),
+    ('explicit_user_alert', 'explicit_alert', 0.30, 'hyperalert', 'user-flagged urgent input');
+
+
+-- ============================================================================
+-- Migration 070_habenula.sql (appended into init_schema for fresh-install parity)
+-- ============================================================================
+-- Migration 070: lateral habenula subsystem — Phase 1 schema
+--
+-- The "anti-reward" / negative-RPE source. Pairs antisymmetrically
+-- with LC (LC = positive surprise → NE; Hb = negative surprise /
+-- reward omission / aversion → DA suppression in Phase 3).
+--
+-- Phase 1 is inspection-only / additive: schema + read+CRUD tools.
+-- Does NOT yet damp bg_modulators.tonic_da. That's Phase 3.
+--
+-- Four invariants encoded:
+--   1. Negative-RPE coding: signed_pe always <= 0.
+--   2. Reward omission distinct from punishment (event_kind).
+--   3. Tonic vs phasic separation.
+--   4. DA-suppression effect proportional to integrated activity
+--      (Phase 3 will use EWMA; Phase 1 just records events).
+--
+-- Rollback:
+--   DROP TABLE IF EXISTS habenula_state;
+--   DROP TABLE IF EXISTS habenula_firings;
+--   DROP TABLE IF EXISTS habenula_triggers;
+--   DELETE FROM schema_version WHERE version = 70;
+--
+-- IDEMPOTENT.
+
+CREATE TABLE IF NOT EXISTS habenula_triggers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    event_kind TEXT NOT NULL CHECK(event_kind IN ('omission', 'aversive', 'repeated_failure', 'other')),
+    default_pe REAL NOT NULL DEFAULT -0.1 CHECK(default_pe <= 0.0),
+    description TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_hb_triggers_kind ON habenula_triggers(event_kind);
+
+CREATE TABLE IF NOT EXISTS habenula_firings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fired_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+    agent_id TEXT,
+    trigger_id INTEGER,
+    event_kind TEXT NOT NULL CHECK(event_kind IN ('omission', 'aversive', 'repeated_failure', 'other')),
+    signed_pe REAL NOT NULL CHECK(signed_pe <= 0.0),
+    context_hash TEXT,
+    source_event_id INTEGER,
+    notes TEXT,
+    FOREIGN KEY (trigger_id) REFERENCES habenula_triggers(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_hb_firings_recent ON habenula_firings(fired_at);
+CREATE INDEX IF NOT EXISTS idx_hb_firings_agent ON habenula_firings(agent_id, fired_at);
+CREATE INDEX IF NOT EXISTS idx_hb_firings_kind ON habenula_firings(event_kind, fired_at);
+
+CREATE TABLE IF NOT EXISTS habenula_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    tonic_activity REAL NOT NULL DEFAULT 0.0,
+    phasic_burst REAL NOT NULL DEFAULT 0.0,
+    rolling_disappointment_24h INTEGER NOT NULL DEFAULT 0,
+    last_firing_at TEXT,
+    suggested_da_damp REAL NOT NULL DEFAULT 0.0,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+);
+INSERT OR IGNORE INTO habenula_state (id) VALUES (1);
+
+INSERT OR IGNORE INTO habenula_triggers (name, event_kind, default_pe, description) VALUES
+    ('reward_omission', 'omission', -0.15, 'expected positive outcome did not arrive'),
+    ('retrieval_failure', 'omission', -0.10, 'memory_search returned no useful candidates'),
+    ('repeated_low_utility', 'repeated_failure', -0.20, 'same query pattern failed 3+ times in 24h'),
+    ('aversive_valence', 'aversive', -0.30, 'amygdala flagged content with strong negative valence'),
+    ('task_abandoned', 'repeated_failure', -0.25, 'agent abandoned a task after failure cascade');
+
+
+-- ============================================================================
+-- Migration 071_hippocampus_ca1_subiculum.sql (appended into init_schema for fresh-install parity)
+-- ============================================================================
+-- Migration 071: hippocampus CA1 + Subiculum — Phase 1 schema
+--
+-- Completes the hippocampal trisynaptic loop. Migration 059 shipped
+-- DG (pattern separation) + CA3 (pattern completion); this migration
+-- adds CA1 (match/mismatch detector) + Subiculum (cortical bridge).
+--
+-- Phase 1 is inspection-only / additive. Tables + tools only. Phase 2
+-- hooks CA1 into the existing hippocampus_* pipeline. Phase 3 wires
+-- Subiculum into workspace_broadcasts. Phase 4 enforces.
+--
+-- Rollback:
+--   DROP TABLE IF EXISTS hippocampus_subiculum_outputs;
+--   DROP TABLE IF EXISTS hippocampus_ca1_state;
+--   DROP TABLE IF EXISTS hippocampus_ca1_comparisons;
+--   DELETE FROM schema_version WHERE version = 71;
+--
+-- IDEMPOTENT.
+
+CREATE TABLE IF NOT EXISTS hippocampus_ca1_comparisons (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    compared_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+    agent_id TEXT,
+    memory_id INTEGER,
+    ec_input_hash TEXT,
+    ca3_output_hash TEXT,
+    match_score REAL NOT NULL CHECK(match_score BETWEEN 0.0 AND 1.0),
+    novelty_score REAL NOT NULL CHECK(novelty_score BETWEEN 0.0 AND 1.0),
+    classification TEXT NOT NULL CHECK(classification IN ('match', 'mismatch', 'partial', 'ambiguous')),
+    notes TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ca1_cmp_recent ON hippocampus_ca1_comparisons(compared_at);
+CREATE INDEX IF NOT EXISTS idx_ca1_cmp_agent ON hippocampus_ca1_comparisons(agent_id, compared_at);
+CREATE INDEX IF NOT EXISTS idx_ca1_cmp_class ON hippocampus_ca1_comparisons(classification, compared_at);
+
+CREATE TABLE IF NOT EXISTS hippocampus_ca1_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    recent_match_rate REAL NOT NULL DEFAULT 0.5 CHECK(recent_match_rate BETWEEN 0.0 AND 1.0),
+    recent_novelty_rate REAL NOT NULL DEFAULT 0.5 CHECK(recent_novelty_rate BETWEEN 0.0 AND 1.0),
+    total_comparisons INTEGER NOT NULL DEFAULT 0,
+    last_comparison_at TEXT,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+);
+INSERT OR IGNORE INTO hippocampus_ca1_state (id) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS hippocampus_subiculum_outputs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    output_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+    agent_id TEXT,
+    memory_id INTEGER,
+    ca1_comparison_id INTEGER,
+    target_channel TEXT NOT NULL CHECK(target_channel IN ('cortex_general', 'workspace_broadcast', 'thalamus_relay', 'other')),
+    output_strength REAL NOT NULL DEFAULT 0.5 CHECK(output_strength BETWEEN 0.0 AND 1.0),
+    notes TEXT,
+    FOREIGN KEY (ca1_comparison_id) REFERENCES hippocampus_ca1_comparisons(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sub_outputs_recent ON hippocampus_subiculum_outputs(output_at);
+CREATE INDEX IF NOT EXISTS idx_sub_outputs_target ON hippocampus_subiculum_outputs(target_channel, output_at);
+
+
+-- ============================================================================
+-- Migration 072_workspace_bandwidth.sql (appended into init_schema for fresh-install parity)
+-- ============================================================================
+-- Migration 072: workspace bandwidth limit — Phase 1 schema
+--
+-- The May 15 brain_region_coverage.md audit flagged the workspace
+-- (global neuronal workspace) as partial: "Fixed salience threshold,
+-- no org_state coupling, no enforced bandwidth limit (any module can
+-- write)."
+--
+-- The thalamus mode-broadcast layer (shipped via thalamus Phase 2)
+-- closed the org_state coupling half. This migration closes the
+-- remaining half: a top-K-per-epoch bandwidth limit on workspace
+-- broadcasts.
+--
+-- Biology: the global neuronal workspace (Dehaene-Changeux model) has
+-- a hard bandwidth — only ~4 chunks can be "ignited" at a time. Without
+-- that constraint, the workspace degenerates into a firehose. brainctl's
+-- current workspace_broadcasts table has no such limit; any module can
+-- write any time. Phase 1 adds the *bookkeeping*; Phase 2 enforces.
+--
+-- Schema:
+--   workspace_bandwidth_state — single row, current epoch + count
+--   workspace_bandwidth_epochs — historical log of completed epochs
+--
+-- Phase 1 is inspection-only / additive. Phase 2 wires the limit
+-- into workspace_ingest. Phase 3 lets the limit be context-modulated
+-- (high arousal = wider bandwidth; consolidation = narrower).
+--
+-- Rollback:
+--   DROP TABLE IF EXISTS workspace_bandwidth_epochs;
+--   DROP TABLE IF EXISTS workspace_bandwidth_state;
+--   DELETE FROM schema_version WHERE version = 72;
+--
+-- IDEMPOTENT.
+
+CREATE TABLE IF NOT EXISTS workspace_bandwidth_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    epoch_started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+    epoch_duration_seconds INTEGER NOT NULL DEFAULT 60 CHECK(epoch_duration_seconds > 0),
+    epoch_count INTEGER NOT NULL DEFAULT 0,        -- broadcasts in the current epoch
+    bandwidth_limit INTEGER NOT NULL DEFAULT 4 CHECK(bandwidth_limit > 0),
+    total_admits INTEGER NOT NULL DEFAULT 0,
+    total_rejects INTEGER NOT NULL DEFAULT 0,
+    enforcement_mode TEXT NOT NULL DEFAULT 'shadow' CHECK(enforcement_mode IN ('shadow', 'enforce', 'disabled')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+);
+INSERT OR IGNORE INTO workspace_bandwidth_state (id) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS workspace_bandwidth_epochs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    epoch_started_at TEXT NOT NULL,
+    epoch_ended_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+    duration_seconds INTEGER NOT NULL,
+    admitted_count INTEGER NOT NULL DEFAULT 0,
+    rejected_count INTEGER NOT NULL DEFAULT 0,
+    bandwidth_limit INTEGER NOT NULL,
+    enforcement_mode TEXT NOT NULL,
+    saturation REAL NOT NULL DEFAULT 0.0           -- admitted_count / bandwidth_limit
+);
+CREATE INDEX IF NOT EXISTS idx_wbe_recent ON workspace_bandwidth_epochs(epoch_ended_at);
+CREATE INDEX IF NOT EXISTS idx_wbe_saturated ON workspace_bandwidth_epochs(saturation);
+
+
+-- ============================================================================
+-- Migration 073_connectome.sql (appended into init_schema for fresh-install parity)
+-- ============================================================================
+-- Migration 073: connectome graph — Phase 1 schema
+--
+-- Operationalizes Avenue 5 from research/autonomous-research-avenues-2026-05-20.md:
+-- "Connectome as a first-class graph." A first-class representation of
+-- which subsystems talk to which, with edge types and weights. Enables
+-- cycle detection, "what writes to this dial" queries, and impact
+-- analysis when changing or disabling a subsystem.
+--
+-- Phase 1 ships the schema + seed catalog of known edges (walked from
+-- the existing code base). Phase 2 adds query tools for graph
+-- traversal and impact analysis. Phase 3 auto-updates the connectome
+-- from runtime observations (which subsystem actually called which).
+--
+-- Edge types:
+--   writes_to     — source mutates a column owned by target
+--   reads_from    — source reads target's state but doesn't mutate
+--   modulates     — source adjusts target's gain / threshold / weight
+--   gates         — source decides whether target's output passes
+--   depends_on    — source requires target's schema/tables to exist
+--   broadcasts_to — source fires events target subscribes to
+--
+-- Rollback:
+--   DROP TABLE IF EXISTS connectome_edges;
+--   DROP TABLE IF EXISTS connectome_nodes;
+--   DELETE FROM schema_version WHERE version = 73;
+--
+-- IDEMPOTENT.
+
+CREATE TABLE IF NOT EXISTS connectome_nodes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    category TEXT NOT NULL CHECK(category IN (
+        'subsystem', 'table', 'dial', 'event_bus', 'external'
+    )),
+    description TEXT,
+    schema_version_introduced INTEGER,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_cn_category ON connectome_nodes(category);
+
+CREATE TABLE IF NOT EXISTS connectome_edges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id INTEGER NOT NULL,
+    target_id INTEGER NOT NULL,
+    edge_type TEXT NOT NULL CHECK(edge_type IN (
+        'writes_to', 'reads_from', 'modulates', 'gates',
+        'depends_on', 'broadcasts_to'
+    )),
+    weight REAL NOT NULL DEFAULT 1.0 CHECK(weight BETWEEN 0.0 AND 1.0),
+    description TEXT,
+    evidence_source TEXT,  -- e.g. 'code:bg_shadow.py:broadcast_td_error'
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+    last_observed_at TEXT,
+    FOREIGN KEY (source_id) REFERENCES connectome_nodes(id) ON DELETE CASCADE,
+    FOREIGN KEY (target_id) REFERENCES connectome_nodes(id) ON DELETE CASCADE,
+    UNIQUE (source_id, target_id, edge_type)
+);
+CREATE INDEX IF NOT EXISTS idx_ce_source ON connectome_edges(source_id);
+CREATE INDEX IF NOT EXISTS idx_ce_target ON connectome_edges(target_id);
+CREATE INDEX IF NOT EXISTS idx_ce_type ON connectome_edges(edge_type);
+
+-- Seed the known subsystem nodes (walked from db/migrations + src/agentmemory).
+INSERT OR IGNORE INTO connectome_nodes (name, category, description, schema_version_introduced) VALUES
+    -- Brain subsystems
+    ('thalamus', 'subsystem', 'typed routing layer + salience + gate', 50),
+    ('basal_ganglia', 'subsystem', 'five-loop action selection + Go/NoGo learning', 54),
+    ('cerebellum', 'subsystem', 'forward-model layer with predict/observe per partner', 56),
+    ('amygdala', 'subsystem', 'rapid valence/threat tagging', 58),
+    ('hippocampus_dg_ca3', 'subsystem', 'DG pattern separation + CA3 pattern completion', 59),
+    ('hippocampus_ca1', 'subsystem', 'CA1 match/mismatch + Subiculum output bridge', 71),
+    ('acc', 'subsystem', 'in-flight conflict / surprise / EVC monitor', 60),
+    ('dmn', 'subsystem', 'default mode network — offline simulation', 61),
+    ('drives', 'subsystem', 'hypothalamic-analog homeostatic drives', 62),
+    ('insula', 'subsystem', 'self-state interoception', 63),
+    ('pfc', 'subsystem', 'named PFC slots (dlPFC/vmPFC/OFC/frontopolar)', 64),
+    ('entorhinal_grid', 'subsystem', '48 grid cells across 3 scales', 65),
+    ('lc', 'subsystem', 'locus coeruleus — NE on surprise', 67),
+    ('nb', 'subsystem', 'nucleus basalis — ACh on attention', 68),
+    ('aras', 'subsystem', 'ascending reticular activating system — global arousal', 69),
+    ('habenula', 'subsystem', 'lateral habenula — anti-reward / negative-PE', 70),
+    ('workspace', 'subsystem', 'global neuronal workspace broadcasts', NULL),
+    ('workspace_bandwidth', 'subsystem', 'top-K-per-epoch bandwidth limit on workspace', 72),
+    -- Buses / shared dials
+    ('bg_td_events', 'event_bus', 'TD-error broadcast bus (δ from outcome_annotate)', 54),
+    ('bg_modulators', 'dial', 'global neuromod dials (tonic_da, lc_ne, serotonin, acetylcholine)', 54),
+    ('workspace_broadcasts', 'table', 'global workspace broadcast event log', NULL),
+    ('cerebellum_boundaries', 'table', 'cerebellum-fired boundary markers above threshold', 56);
+
+-- Seed the known edges (walked from code as of 2026-05-20).
+-- Subsystem → bus / dial edges first.
+INSERT OR IGNORE INTO connectome_edges (source_id, target_id, edge_type, weight, description, evidence_source) VALUES
+    -- BG closes the actor-critic loop through bg_td_events + bg_modulators
+    ((SELECT id FROM connectome_nodes WHERE name='basal_ganglia'),
+     (SELECT id FROM connectome_nodes WHERE name='bg_td_events'),
+     'writes_to', 1.0, 'broadcast_td_error inserts TD events', 'code:bg_shadow.py:broadcast_td_error'),
+    ((SELECT id FROM connectome_nodes WHERE name='basal_ganglia'),
+     (SELECT id FROM connectome_nodes WHERE name='bg_modulators'),
+     'writes_to', 1.0, 'bg_modulator_set + cascade', 'code:mcp_tools_basal_ganglia.py'),
+    -- Cerebellum fires boundaries + feeds bg_td_events
+    ((SELECT id FROM connectome_nodes WHERE name='cerebellum'),
+     (SELECT id FROM connectome_nodes WHERE name='cerebellum_boundaries'),
+     'writes_to', 1.0, 'high |delta_forward| → boundary marker', 'code:cerebellum_shadow.py'),
+    ((SELECT id FROM connectome_nodes WHERE name='cerebellum'),
+     (SELECT id FROM connectome_nodes WHERE name='bg_td_events'),
+     'broadcasts_to', 0.8, 'cerebellum delta supplements BG TD signal', 'code:cerebellum_shadow.py'),
+    ((SELECT id FROM connectome_nodes WHERE name='cerebellum_boundaries'),
+     (SELECT id FROM connectome_nodes WHERE name='workspace_broadcasts'),
+     'broadcasts_to', 1.0, 'high-PE events fire workspace broadcasts', 'migration:057_cerebellum_workspace_bridge.sql'),
+    -- Thalamus reads modulators (cascade source)
+    ((SELECT id FROM connectome_nodes WHERE name='thalamus'),
+     (SELECT id FROM connectome_nodes WHERE name='bg_modulators'),
+     'reads_from', 1.0, 'tonic_da → wake_focused vs wake_exploratory cascade', 'commit:32c466e'),
+    ((SELECT id FROM connectome_nodes WHERE name='basal_ganglia'),
+     (SELECT id FROM connectome_nodes WHERE name='thalamus'),
+     'modulates', 1.0, 'BG modulator cascade to thalamus mode', 'commit:32c466e'),
+    -- LC + NB + ARAS + Habenula (tonight's shipping) all write/read bg_modulators
+    ((SELECT id FROM connectome_nodes WHERE name='lc'),
+     (SELECT id FROM connectome_nodes WHERE name='bg_modulators'),
+     'reads_from', 1.0, 'reads lc_ne dial in lc_status (Phase 1); will write in Phase 2', 'code:mcp_tools_locus_coeruleus.py'),
+    ((SELECT id FROM connectome_nodes WHERE name='nb'),
+     (SELECT id FROM connectome_nodes WHERE name='bg_modulators'),
+     'depends_on', 1.0, 'migration 068 adds acetylcholine column to bg_modulators', 'migration:068_nucleus_basalis.sql'),
+    ((SELECT id FROM connectome_nodes WHERE name='aras'),
+     (SELECT id FROM connectome_nodes WHERE name='lc'),
+     'modulates', 0.5, 'Phase 3: low arousal damps LC phasic firings (planned)', 'docs/proposals/aras.md'),
+    ((SELECT id FROM connectome_nodes WHERE name='aras'),
+     (SELECT id FROM connectome_nodes WHERE name='nb'),
+     'modulates', 0.5, 'Phase 3: high arousal amplifies NB attention bursts (planned)', 'docs/proposals/aras.md'),
+    ((SELECT id FROM connectome_nodes WHERE name='habenula'),
+     (SELECT id FROM connectome_nodes WHERE name='bg_modulators'),
+     'modulates', 0.5, 'Phase 3: suggested_da_damp subtracts from tonic_da (planned)', 'docs/proposals/habenula.md'),
+    -- Hippocampal chain
+    ((SELECT id FROM connectome_nodes WHERE name='hippocampus_dg_ca3'),
+     (SELECT id FROM connectome_nodes WHERE name='hippocampus_ca1'),
+     'broadcasts_to', 1.0, 'CA3 pattern completion feeds CA1 comparison (Phase 2 will auto-wire)', 'docs/proposals/hippocampus_ca1_subiculum.md'),
+    ((SELECT id FROM connectome_nodes WHERE name='hippocampus_ca1'),
+     (SELECT id FROM connectome_nodes WHERE name='workspace_broadcasts'),
+     'broadcasts_to', 0.5, 'Phase 3: subiculum output fires workspace broadcasts (planned)', 'docs/proposals/hippocampus_ca1_subiculum.md'),
+    -- Workspace bandwidth gates workspace_broadcasts
+    ((SELECT id FROM connectome_nodes WHERE name='workspace_bandwidth'),
+     (SELECT id FROM connectome_nodes WHERE name='workspace_broadcasts'),
+     'gates', 1.0, 'Phase 2: every workspace broadcast checked against bandwidth limit (planned)', 'docs/proposals (workspace_bandwidth)'),
+    -- ACC fires BG holds
+    ((SELECT id FROM connectome_nodes WHERE name='acc'),
+     (SELECT id FROM connectome_nodes WHERE name='basal_ganglia'),
+     'gates', 0.8, 'high EVC fires BG holds', 'code:mcp_tools_acc.py'),
+    -- DMN reads insula state
+    ((SELECT id FROM connectome_nodes WHERE name='dmn'),
+     (SELECT id FROM connectome_nodes WHERE name='insula'),
+     'reads_from', 0.7, 'DMN simulation conditions on self-state vector', 'code:mcp_tools_dmn.py'),
+    -- Insula subscribers
+    ((SELECT id FROM connectome_nodes WHERE name='insula'),
+     (SELECT id FROM connectome_nodes WHERE name='drives'),
+     'broadcasts_to', 0.7, 'self-state changes notify drive monitors', 'code:mcp_tools_insula.py');
+
+
+-- ============================================================================
+-- Migration 074_sleep_architecture.sql (appended into init_schema for fresh-install parity)
+-- ============================================================================
+-- Migration 074: sleep architecture — Phase 1 schema
+--
+-- Operationalizes Avenue 1 from research/autonomous-research-avenues-2026-05-20.md:
+-- "Sleep architecture as a first-class state machine." Biology
+-- partitions sleep into NREM 1/2/3 + REM, each with qualitatively
+-- different memory operations. brainctl's dream_cycle + DMN treat
+-- sleep as one undifferentiated state.
+--
+-- Phase 1 ships:
+--   sleep_cycle_state — current cycle + stage + entry time
+--   sleep_cycle_transitions — log of stage transitions with cause
+--   sleep_stage_catalog — per-stage description + permitted operations
+--
+-- The catalog encodes what each stage *can* do (NREM2 = spindles +
+-- declarative consolidation; NREM3/SWS = sharp-wave ripples + replay;
+-- REM = procedural / emotional consolidation + bisociation).
+--
+-- Phase 1 is inspection + manual writes. Phase 2 auto-progresses
+-- through ultradian cycles when ARAS sleep_wake_mode = nrem/rem_sleep.
+-- Phase 3 stage-gates consolidation operations.
+--
+-- Rollback:
+--   DROP TABLE IF EXISTS sleep_cycle_transitions;
+--   DROP TABLE IF EXISTS sleep_cycle_state;
+--   DROP TABLE IF EXISTS sleep_stage_catalog;
+--   DELETE FROM schema_version WHERE version = 74;
+--
+-- IDEMPOTENT.
+
+CREATE TABLE IF NOT EXISTS sleep_stage_catalog (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage TEXT NOT NULL UNIQUE CHECK(stage IN ('nrem1', 'nrem2', 'nrem3_sws', 'rem', 'awake')),
+    typical_duration_seconds INTEGER NOT NULL DEFAULT 600,
+    description TEXT,
+    permitted_operations TEXT,    -- comma-separated tags (e.g. 'spindle_consolidation,replay,bisociation')
+    arousal_floor REAL NOT NULL DEFAULT 0.0,
+    arousal_ceiling REAL NOT NULL DEFAULT 1.0,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS sleep_cycle_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    current_stage TEXT NOT NULL DEFAULT 'awake' CHECK(current_stage IN ('nrem1', 'nrem2', 'nrem3_sws', 'rem', 'awake')),
+    cycle_number INTEGER NOT NULL DEFAULT 0,         -- ultradian cycle count (each ~90 min in biology)
+    stage_entered_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+    cycle_started_at TEXT,
+    total_sleep_seconds INTEGER NOT NULL DEFAULT 0,
+    total_rem_seconds INTEGER NOT NULL DEFAULT 0,
+    total_sws_seconds INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+);
+INSERT OR IGNORE INTO sleep_cycle_state (id) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS sleep_cycle_transitions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    transitioned_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+    agent_id TEXT,
+    from_stage TEXT NOT NULL,
+    to_stage TEXT NOT NULL,
+    cycle_number INTEGER NOT NULL,
+    duration_in_from_stage_seconds INTEGER,
+    reason TEXT,
+    triggered_by TEXT  -- 'manual' | 'aras_signal' | 'duration_elapsed' | 'consolidation_complete'
+);
+CREATE INDEX IF NOT EXISTS idx_sct_recent ON sleep_cycle_transitions(transitioned_at);
+CREATE INDEX IF NOT EXISTS idx_sct_to_stage ON sleep_cycle_transitions(to_stage, transitioned_at);
+CREATE INDEX IF NOT EXISTS idx_sct_cycle ON sleep_cycle_transitions(cycle_number);
+
+INSERT OR IGNORE INTO sleep_stage_catalog (stage, typical_duration_seconds, description, permitted_operations, arousal_floor, arousal_ceiling) VALUES
+    ('awake', 0, 'normal operating state — full retrieval and writes enabled', 'all', 0.30, 1.0),
+    ('nrem1', 300, 'sleep onset — light, easily aroused; no canonical memory op', 'idle_decay', 0.15, 0.40),
+    ('nrem2', 1500, 'spindle stage — sleep spindles + slow oscillations; declarative consolidation', 'spindle_consolidation,semantic_promotion', 0.10, 0.30),
+    ('nrem3_sws', 1200, 'slow-wave sleep — sharp-wave ripples; hippocampus→neocortex replay', 'swr_replay,episodic_to_semantic,memory_promote', 0.05, 0.20),
+    ('rem', 900, 'REM — procedural + emotional consolidation; bisociative recombination; dreaming', 'procedural_consolidation,bisociation,dmn_simulate,reconsolidate', 0.20, 0.50);
+
+
+-- ============================================================================
+-- Migration 075_vta_snc.sql (appended into init_schema for fresh-install parity)
+-- ============================================================================
+-- Migration 075: VTA/SNc dopamine source — Phase 1 schema
+--
+-- Avenue 7 from research/autonomous-research-avenues-2026-05-20.md.
+-- Currently dopamine in brainctl exists as a *dial*
+-- (bg_modulators.tonic_da) and a *broadcast* (bg_td_events.delta).
+-- What's missing is the **nucleus** that sources the signal with its
+-- own state and firing log.
+--
+-- This migration adds:
+--   vta_firings — log of phasic dopamine events (the nucleus's
+--                 actual firing) with magnitude + source
+--   vta_state — single row tracking tonic baseline, phasic count,
+--               authentication-style "burst budget" (depletes per
+--               firing, refills with time)
+--   vta_pathway_links — VTA projects to many targets; this catalogs
+--                       which downstream subsystems receive DA from VTA
+--                       vs SNc (Mesolimbic, Mesocortical, Nigrostriatal)
+--
+-- Pairs with Habenula (PR #124, migration 070): Habenula's
+-- suggested_da_damp is the input habenula side; VTA tracks the output
+-- side. Phase 3 connects them — Habenula damping reduces VTA tonic.
+--
+-- Rollback:
+--   DROP TABLE IF EXISTS vta_pathway_links;
+--   DROP TABLE IF EXISTS vta_firings;
+--   DROP TABLE IF EXISTS vta_state;
+--   DELETE FROM schema_version WHERE version = 75;
+--
+-- IDEMPOTENT.
+
+CREATE TABLE IF NOT EXISTS vta_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    tonic_da REAL NOT NULL DEFAULT 0.5 CHECK(tonic_da BETWEEN 0.0 AND 1.0),
+    phasic_burst REAL NOT NULL DEFAULT 0.0 CHECK(phasic_burst BETWEEN 0.0 AND 1.0),
+    burst_budget REAL NOT NULL DEFAULT 1.0 CHECK(burst_budget BETWEEN 0.0 AND 1.0),
+    pathology_flag TEXT CHECK(pathology_flag IN ('none', 'low_da', 'high_da') OR pathology_flag IS NULL),
+    last_phasic_at TEXT,
+    last_tonic_update_at TEXT,
+    total_firings INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+);
+INSERT OR IGNORE INTO vta_state (id, pathology_flag) VALUES (1, 'none');
+
+CREATE TABLE IF NOT EXISTS vta_firings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fired_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+    agent_id TEXT,
+    burst_magnitude REAL NOT NULL CHECK(burst_magnitude BETWEEN 0.0 AND 1.0),
+    source_kind TEXT NOT NULL CHECK(source_kind IN (
+        'bg_td_positive', 'novelty', 'reward_received', 'explicit_motivation', 'other'
+    )),
+    source_event_id INTEGER,
+    target_pathway TEXT CHECK(target_pathway IN (
+        'mesolimbic', 'mesocortical', 'nigrostriatal', 'broadcast', 'other'
+    )),
+    notes TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_vta_recent ON vta_firings(fired_at);
+CREATE INDEX IF NOT EXISTS idx_vta_pathway ON vta_firings(target_pathway, fired_at);
+CREATE INDEX IF NOT EXISTS idx_vta_source ON vta_firings(source_kind, fired_at);
+
+CREATE TABLE IF NOT EXISTS vta_pathway_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pathway TEXT NOT NULL CHECK(pathway IN ('mesolimbic', 'mesocortical', 'nigrostriatal', 'broadcast')),
+    target_subsystem TEXT NOT NULL,
+    description TEXT,
+    UNIQUE (pathway, target_subsystem)
+);
+
+INSERT OR IGNORE INTO vta_pathway_links (pathway, target_subsystem, description) VALUES
+    ('mesolimbic', 'nucleus_accumbens', 'reward-seeking / motivational salience (NAc-analog in BG)'),
+    ('mesolimbic', 'amygdala', 'salience tagging — DA boosts amygdala valence updates'),
+    ('mesocortical', 'pfc', 'PFC working memory + executive — DA gates PBWM updates'),
+    ('mesocortical', 'acc', 'effort / cost-of-control modulation'),
+    ('nigrostriatal', 'basal_ganglia', 'striatal Go/NoGo learning — primary RL training signal'),
+    ('broadcast', 'bg_modulators', 'global tonic_da dial — every reader sees the modulation');
+
+
+-- ============================================================================
+-- Migration 076_septum_theta.sql (appended into init_schema for fresh-install parity)
+-- ============================================================================
+-- Migration 076: medial septum + theta rhythm — Phase 1 schema
+--
+-- Avenue 8 from research/autonomous-research-avenues-2026-05-20.md.
+-- Medial septum is the hippocampal theta pacemaker (4-8 Hz rhythm).
+-- The cmd_search docstring already mentions "theta-gamma coupling"
+-- ("Result count is capped at 7 × agent attention_budget_tier") but
+-- there's no actual theta clock.
+--
+-- Phase 1 ships:
+--   septum_state — single row tracking current phase + bin + cycle count
+--   septum_ticks — log of theta-cycle ticks (heartbeat)
+--   septum_phase_locked_memories — index of which theta bin each
+--                                  memory was written/recalled in
+--
+-- Phase 1 = manual tick advancement + queries. Phase 2 = daemon-driven
+-- automatic ticking on a configurable cadence. Phase 3 = phase-locked
+-- memory_search (only memories from the current theta bin).
+--
+-- Rollback:
+--   DROP TABLE IF EXISTS septum_phase_locked_memories;
+--   DROP TABLE IF EXISTS septum_ticks;
+--   DROP TABLE IF EXISTS septum_state;
+--   DELETE FROM schema_version WHERE version = 76;
+--
+-- IDEMPOTENT.
+
+CREATE TABLE IF NOT EXISTS septum_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    theta_frequency_hz REAL NOT NULL DEFAULT 6.0 CHECK(theta_frequency_hz BETWEEN 4.0 AND 8.0),
+    theta_phase REAL NOT NULL DEFAULT 0.0 CHECK(theta_phase BETWEEN 0.0 AND 6.283185307),  -- radians
+    theta_bin INTEGER NOT NULL DEFAULT 0 CHECK(theta_bin BETWEEN 0 AND 7),  -- 8 bins per cycle (45°)
+    cycle_count INTEGER NOT NULL DEFAULT 0,
+    last_tick_at TEXT,
+    enabled INTEGER NOT NULL DEFAULT 0,  -- 0=disabled, 1=enabled (Phase 2 daemon flag)
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+);
+INSERT OR IGNORE INTO septum_state (id) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS septum_ticks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticked_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+    cycle_count INTEGER NOT NULL,
+    theta_bin INTEGER NOT NULL,
+    triggered_by TEXT  -- 'manual' | 'daemon' | 'aras_signal'
+);
+CREATE INDEX IF NOT EXISTS idx_septum_ticks_recent ON septum_ticks(ticked_at);
+CREATE INDEX IF NOT EXISTS idx_septum_ticks_cycle ON septum_ticks(cycle_count);
+
+CREATE TABLE IF NOT EXISTS septum_phase_locked_memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id INTEGER NOT NULL,
+    locked_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+    theta_bin INTEGER NOT NULL,
+    cycle_count INTEGER NOT NULL,
+    operation TEXT NOT NULL CHECK(operation IN ('write', 'recall', 'reconsolidate')),
+    UNIQUE (memory_id, locked_at, operation)
+);
+CREATE INDEX IF NOT EXISTS idx_splm_bin ON septum_phase_locked_memories(theta_bin, locked_at);
+CREATE INDEX IF NOT EXISTS idx_splm_memory ON septum_phase_locked_memories(memory_id);
+
+
+-- ============================================================================
+-- Migration 077_raphe.sql (appended into init_schema for fresh-install parity)
+-- ============================================================================
+-- Migration 077: raphe nuclei — Phase 1 schema
+--
+-- Serotonin source structure. Completes the neuromod-source trio
+-- with LC (NE, migration 067) and VTA/SNc (DA, migration 075).
+-- Currently serotonin in brainctl exists only as a dial
+-- (bg_modulators.serotonin); there's no source nucleus with state.
+--
+-- Biology: dorsal raphe + median raphe nuclei produce most CNS
+-- serotonin. 5-HT modulates patience, time horizon, mood persistence,
+-- and the cost of waiting. Often framed as the "anti-impulsivity"
+-- broadcaster. Low 5-HT correlates with impulsive / short-horizon
+-- decisions; sustained high 5-HT extends the time horizon agents
+-- will tolerate before giving up.
+--
+-- Phase 1 ships:
+--   raphe_state — single row with tonic_5ht, phasic_burst,
+--                time_horizon (seconds the system is willing to wait),
+--                mood_baseline (sustained valence floor)
+--   raphe_firings — log of phasic 5-HT events
+--   raphe_subtype_catalog — DRN (dorsal) vs MRN (median) functional split
+--
+-- Phase 3 will wire raphe.time_horizon into BG's eligibility-trace decay
+-- (high 5-HT → longer eligibility windows).
+--
+-- Rollback:
+--   DROP TABLE IF EXISTS raphe_subtype_catalog;
+--   DROP TABLE IF EXISTS raphe_firings;
+--   DROP TABLE IF EXISTS raphe_state;
+--   DELETE FROM schema_version WHERE version = 77;
+--
+-- IDEMPOTENT.
+
+CREATE TABLE IF NOT EXISTS raphe_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    tonic_5ht REAL NOT NULL DEFAULT 0.5 CHECK(tonic_5ht BETWEEN 0.0 AND 1.0),
+    phasic_burst REAL NOT NULL DEFAULT 0.0 CHECK(phasic_burst BETWEEN 0.0 AND 1.0),
+    time_horizon_seconds INTEGER NOT NULL DEFAULT 300 CHECK(time_horizon_seconds > 0),
+    mood_baseline REAL NOT NULL DEFAULT 0.0 CHECK(mood_baseline BETWEEN -1.0 AND 1.0),
+    last_phasic_at TEXT,
+    total_firings INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+);
+INSERT OR IGNORE INTO raphe_state (id) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS raphe_firings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fired_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+    agent_id TEXT,
+    subtype TEXT NOT NULL CHECK(subtype IN ('drn', 'mrn')),
+    magnitude REAL NOT NULL CHECK(magnitude BETWEEN 0.0 AND 1.0),
+    trigger_kind TEXT CHECK(trigger_kind IN (
+        'patience_required', 'sustained_effort', 'long_horizon_plan',
+        'mood_stabilization', 'manual', 'other'
+    ) OR trigger_kind IS NULL),
+    notes TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_raphe_recent ON raphe_firings(fired_at);
+CREATE INDEX IF NOT EXISTS idx_raphe_subtype ON raphe_firings(subtype, fired_at);
+
+CREATE TABLE IF NOT EXISTS raphe_subtype_catalog (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subtype TEXT NOT NULL UNIQUE CHECK(subtype IN ('drn', 'mrn')),
+    description TEXT,
+    target_subsystems TEXT,    -- comma-separated
+    primary_effect TEXT
+);
+INSERT OR IGNORE INTO raphe_subtype_catalog (subtype, description, target_subsystems, primary_effect) VALUES
+    ('drn', 'dorsal raphe nucleus — broad cortical + limbic projection', 'pfc,acc,amygdala,bg', 'time_horizon, patience, cost-of-waiting'),
+    ('mrn', 'median raphe nucleus — hippocampus + septum projection', 'hippocampus,septum', 'mood persistence, contextual stability');
+
+
+-- ============================================================================
+-- Migration 078_memory_aging.sql (appended into init_schema for fresh-install parity)
+-- ============================================================================
+-- Migration 078: memory aging — synaptic tagging-and-capture
+--
+-- Avenue 2 from research/autonomous-research-avenues-2026-05-20.md.
+-- Frey & Morris's synaptic tagging-and-capture hypothesis: memory's
+-- late-LTP requires both a TAG (at the synapse during initial encoding)
+-- AND plasticity-related proteins (PRPs) showing up within ~1 hour.
+--
+-- brainctl analog: W(m) gate is the *tag* — "this is plausibly worth
+-- keeping". What's missing is the **capture** step that decides
+-- whether the memory actually lasts past short-term, conditional on
+-- a follow-up signal (typically recall within a critical window).
+--
+-- Phase 1 ships:
+--   memory_tags — per-memory tag with capture deadline + status
+--   memory_capture_events — log of capture events (recall, association)
+--                           that "consume" the PRP-equivalent
+--   memory_aging_state — single-row config (capture_window_hours,
+--                        demotion_tier, default decay aggressiveness)
+--
+-- Phase 1 = inspection + manual tag/capture. Phase 2 auto-tags on
+-- memory_add. Phase 3 demotes uncaptured tags to a side tier
+-- (memories_unconsolidated). Phase 4 enforces aggressive demotion.
+--
+-- Rollback:
+--   DROP TABLE IF EXISTS memory_capture_events;
+--   DROP TABLE IF EXISTS memory_tags;
+--   DROP TABLE IF EXISTS memory_aging_state;
+--   DELETE FROM schema_version WHERE version = 78;
+--
+-- IDEMPOTENT.
+
+CREATE TABLE IF NOT EXISTS memory_aging_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    capture_window_hours INTEGER NOT NULL DEFAULT 24 CHECK(capture_window_hours > 0),
+    demotion_tier TEXT NOT NULL DEFAULT 'unconsolidated' CHECK(demotion_tier IN (
+        'unconsolidated', 'cold_storage', 'retired'
+    )),
+    enforcement_mode TEXT NOT NULL DEFAULT 'shadow' CHECK(enforcement_mode IN (
+        'shadow', 'enforce', 'disabled'
+    )),
+    total_tags INTEGER NOT NULL DEFAULT 0,
+    total_captured INTEGER NOT NULL DEFAULT 0,
+    total_demoted INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+);
+INSERT OR IGNORE INTO memory_aging_state (id) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS memory_tags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id INTEGER NOT NULL UNIQUE,
+    tagged_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+    capture_deadline TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'tagged' CHECK(status IN (
+        'tagged', 'captured', 'expired', 'demoted'
+    )),
+    captured_at TEXT,
+    capture_count INTEGER NOT NULL DEFAULT 0,
+    demoted_at TEXT,
+    notes TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_mt_status ON memory_tags(status, tagged_at);
+CREATE INDEX IF NOT EXISTS idx_mt_deadline ON memory_tags(capture_deadline) WHERE status = 'tagged';
+CREATE INDEX IF NOT EXISTS idx_mt_memory ON memory_tags(memory_id);
+
+CREATE TABLE IF NOT EXISTS memory_capture_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    captured_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+    memory_id INTEGER NOT NULL,
+    tag_id INTEGER REFERENCES memory_tags(id) ON DELETE SET NULL,
+    capture_kind TEXT NOT NULL CHECK(capture_kind IN (
+        'recall', 'reconsolidation', 'association', 'manual_capture', 'other'
+    )),
+    agent_id TEXT,
+    notes TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_mce_recent ON memory_capture_events(captured_at);
+CREATE INDEX IF NOT EXISTS idx_mce_kind ON memory_capture_events(capture_kind, captured_at);
+
+
+-- ============================================================================
+-- Migration 079_claustrum.sql (appended into init_schema for fresh-install parity)
+-- ============================================================================
+-- Migration 079: claustrum — Phase 1 cross-modal binding
+--
+-- Avenue 3 from research/autonomous-research-avenues-2026-05-20.md.
+-- The claustrum is a thin sheet that everyone projects to and that
+-- projects to everyone (Crick & Koch 2005). Function: cross-modal
+-- binding / consciousness integration.
+--
+-- brainctl analog: detect when multiple retrieval modalities (FTS,
+-- vector, hybrid_rrf, pagerank_boost, multi_pass, temporal_expand,
+-- entorhinal_grid, procedural_search) converge on the same memory.
+-- Cross-modal convergence is a strong signal that wasn't previously
+-- tracked.
+--
+-- Phase 1 ships:
+--   claustrum_binding_events — when ≥2 modalities surface the same
+--                              memory_id within a window
+--   claustrum_modality_catalog — known retrieval modalities + meta
+--   claustrum_state — running stats
+--
+-- Phase 2 auto-detects from cmd_search. Phase 3 boosts memory
+-- confidence by binding_strength when multiple modalities agree.
+--
+-- Rollback:
+--   DROP TABLE IF EXISTS claustrum_binding_events;
+--   DROP TABLE IF EXISTS claustrum_modality_catalog;
+--   DROP TABLE IF EXISTS claustrum_state;
+--   DELETE FROM schema_version WHERE version = 79;
+--
+-- IDEMPOTENT.
+
+CREATE TABLE IF NOT EXISTS claustrum_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    binding_window_seconds INTEGER NOT NULL DEFAULT 60 CHECK(binding_window_seconds > 0),
+    min_modalities_for_binding INTEGER NOT NULL DEFAULT 2 CHECK(min_modalities_for_binding >= 2),
+    total_bindings INTEGER NOT NULL DEFAULT 0,
+    enforcement_mode TEXT NOT NULL DEFAULT 'shadow' CHECK(enforcement_mode IN ('shadow', 'enforce', 'disabled')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+);
+INSERT OR IGNORE INTO claustrum_state (id) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS claustrum_modality_catalog (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT,
+    weight REAL NOT NULL DEFAULT 1.0 CHECK(weight BETWEEN 0.0 AND 1.0),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+);
+
+INSERT OR IGNORE INTO claustrum_modality_catalog (name, description, weight) VALUES
+    ('fts', 'BM25 full-text search via memories_fts', 1.0),
+    ('vector', 'cosine-distance search via vec_memories', 1.0),
+    ('hybrid_rrf', 'reciprocal rank fusion of FTS + vector', 1.0),
+    ('pagerank_boost', 'SR-style retrieval (PageRank == Successor Representation)', 0.8),
+    ('multi_pass', 'SDM-style iterative convergence', 0.8),
+    ('temporal_expand', 'TCM temporal contiguity expansion', 0.7),
+    ('entorhinal_grid', 'grid-cell hash activation lookup', 0.9),
+    ('procedural_search', 'procedural memory FTS5 search', 0.9),
+    ('ca3_completion', 'CA3 pattern-completion via hippocampus_ca3', 1.0);
+
+CREATE TABLE IF NOT EXISTS claustrum_binding_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bound_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+    memory_id INTEGER NOT NULL,
+    agent_id TEXT,
+    query_hash TEXT,
+    modalities TEXT NOT NULL,       -- comma-separated list of modality names that converged
+    modality_count INTEGER NOT NULL CHECK(modality_count >= 2),
+    binding_strength REAL NOT NULL CHECK(binding_strength BETWEEN 0.0 AND 1.0),
+    notes TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_cbe_recent ON claustrum_binding_events(bound_at);
+CREATE INDEX IF NOT EXISTS idx_cbe_memory ON claustrum_binding_events(memory_id, bound_at);
+CREATE INDEX IF NOT EXISTS idx_cbe_strength ON claustrum_binding_events(binding_strength);
+
+
+-- ============================================================================
+-- Migration 080_colliculi.sql (appended into init_schema for fresh-install parity)
+-- ============================================================================
+-- Migration 080: superior + inferior colliculi — Phase 1 schema
+--
+-- Avenue 9 from research/autonomous-research-avenues-2026-05-20.md.
+-- Subcortical orienting reflex: superior colliculus (SC) = visual /
+-- attention orienting; inferior colliculus (IC) = auditory orienting.
+-- They fire BEFORE cortical processing and bias attention rapidly.
+--
+-- brainctl analog: pre-cortical orienting on novel-pattern signals
+-- (new entity sightings, unfamiliar query shapes, unusual content
+-- types). Fires a fast ARAS drive pulse + thalamic mode adjustment
+-- before the full retrieval pipeline gets going.
+--
+-- Phase 1 ships:
+--   colliculi_orienting_events — log of pre-cortical orient events
+--   colliculi_state — single row tracking SC/IC tonic activity
+--   colliculi_trigger_patterns — pattern catalog (which novel shapes
+--                                fire which sub-nucleus)
+--
+-- Phase 2 wires into MCP dispatch as a sub-millisecond early-fire
+-- before BG/cerebellum consults. Phase 3 modulates ARAS + thalamus
+-- in response.
+--
+-- Rollback:
+--   DROP TABLE IF EXISTS colliculi_trigger_patterns;
+--   DROP TABLE IF EXISTS colliculi_orienting_events;
+--   DROP TABLE IF EXISTS colliculi_state;
+--   DELETE FROM schema_version WHERE version = 80;
+--
+-- IDEMPOTENT.
+
+CREATE TABLE IF NOT EXISTS colliculi_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    sc_tonic REAL NOT NULL DEFAULT 0.3 CHECK(sc_tonic BETWEEN 0.0 AND 1.0),
+    ic_tonic REAL NOT NULL DEFAULT 0.3 CHECK(ic_tonic BETWEEN 0.0 AND 1.0),
+    total_orienting_events INTEGER NOT NULL DEFAULT 0,
+    last_orient_at TEXT,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+);
+INSERT OR IGNORE INTO colliculi_state (id) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS colliculi_trigger_patterns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    sub_nucleus TEXT NOT NULL CHECK(sub_nucleus IN ('sc', 'ic')),
+    pattern_kind TEXT NOT NULL CHECK(pattern_kind IN (
+        'novel_entity_shape', 'unfamiliar_query_form', 'unusual_content_type',
+        'sudden_volume_change', 'cross_modal_mismatch', 'other'
+    )),
+    default_strength REAL NOT NULL DEFAULT 0.4 CHECK(default_strength BETWEEN 0.0 AND 1.0),
+    description TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+);
+
+INSERT OR IGNORE INTO colliculi_trigger_patterns (name, sub_nucleus, pattern_kind, default_strength, description) VALUES
+    ('new_entity_seen', 'sc', 'novel_entity_shape', 0.5, 'previously-unseen entity name pattern'),
+    ('unusual_query_structure', 'sc', 'unfamiliar_query_form', 0.4, 'query token sequence doesn''t match recent distribution'),
+    ('content_type_shift', 'sc', 'unusual_content_type', 0.3, 'incoming content uses category not seen in last 7d'),
+    ('audio_burst', 'ic', 'sudden_volume_change', 0.6, 'audio input event with sharp amplitude'),
+    ('cross_modal_disagree', 'ic', 'cross_modal_mismatch', 0.5, 'auditory + visual signals disagree about same target');
+
+CREATE TABLE IF NOT EXISTS colliculi_orienting_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    oriented_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+    agent_id TEXT,
+    sub_nucleus TEXT NOT NULL CHECK(sub_nucleus IN ('sc', 'ic')),
+    pattern_id INTEGER REFERENCES colliculi_trigger_patterns(id) ON DELETE SET NULL,
+    strength REAL NOT NULL CHECK(strength BETWEEN 0.0 AND 1.0),
+    target_description TEXT,
+    aras_drive_fired INTEGER NOT NULL DEFAULT 0,    -- 1 if downstream ARAS was nudged
+    notes TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_coe_recent ON colliculi_orienting_events(oriented_at);
+CREATE INDEX IF NOT EXISTS idx_coe_subnucleus ON colliculi_orienting_events(sub_nucleus, oriented_at);
+
+
+-- ============================================================================
+-- Migration 081_mammillary.sql (appended into init_schema for fresh-install parity)
+-- ============================================================================
+-- Migration 081: mammillary bodies + Papez circuit — Phase 1 schema
+--
+-- The mammillary bodies are the Papez-circuit hub:
+--   hippocampus → fornix → mammillary bodies → ATN (anterior thalamus)
+--                       → cingulate → hippocampus
+--
+-- Damage produces Korsakoff syndrome — dense anterograde amnesia.
+-- ATN-DAMAGE > MD-thalamus for that pattern. Mammillary bodies are
+-- thus a specific bottleneck in episodic memory consolidation.
+--
+-- Existing brainctl has the broad hippocampus subsystem + (now) CA1
+-- + Subiculum + anterior-thalamus-analog inside the thalamus module.
+-- What's missing is the explicit Papez-loop transport: which memories
+-- have made it through the (hippocampus → MB → ATN → cingulate)
+-- circuit vs. which are still hippocampus-only.
+--
+-- Phase 1 ships:
+--   mammillary_transit_log — log of episodic memories whose
+--                            consolidation has passed through the Papez
+--                            circuit at least once
+--   mammillary_state — single row tracking transit count + recent rate
+--
+-- Phase 2 will auto-log Papez transit on consolidation_run for
+-- episodic memories. Phase 3 will let Papez-completed memories surface
+-- with higher confidence in retrieval (proxy for "consolidated into
+-- declarative knowledge").
+--
+-- Rollback:
+--   DROP TABLE IF EXISTS mammillary_transit_log;
+--   DROP TABLE IF EXISTS mammillary_state;
+--   DELETE FROM schema_version WHERE version = 81;
+--
+-- IDEMPOTENT.
+
+CREATE TABLE IF NOT EXISTS mammillary_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    total_transits INTEGER NOT NULL DEFAULT 0,
+    transits_24h INTEGER NOT NULL DEFAULT 0,
+    last_transit_at TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+);
+INSERT OR IGNORE INTO mammillary_state (id) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS mammillary_transit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    transited_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+    memory_id INTEGER NOT NULL,
+    agent_id TEXT,
+    direction TEXT NOT NULL CHECK(direction IN (
+        'hippocampus_to_atn',     -- forward leg of Papez
+        'atn_to_cingulate',       -- top-down
+        'cingulate_to_hippocampus', -- closing the loop
+        'full_loop'                  -- single full Papez circuit completion
+    )),
+    transit_strength REAL NOT NULL DEFAULT 1.0 CHECK(transit_strength BETWEEN 0.0 AND 1.0),
+    notes TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_mtl_recent ON mammillary_transit_log(transited_at);
+CREATE INDEX IF NOT EXISTS idx_mtl_memory ON mammillary_transit_log(memory_id, transited_at);
+CREATE INDEX IF NOT EXISTS idx_mtl_direction ON mammillary_transit_log(direction, transited_at);
+
+
+-- ============================================================================
+-- Migration 082_olfactory.sql (appended into init_schema for fresh-install parity)
+-- ============================================================================
+-- Migration 082: olfactory cortex — Phase 1 schema
+--
+-- Olfactory cortex is the ONE sensory modality that bypasses thalamus.
+-- Olfactory bulb projects directly to piriform cortex + amygdala +
+-- entorhinal cortex. This direct route is why smells produce such
+-- strong emotional/memory recall (Proust effect).
+--
+-- brainctl analog: a "direct binding" channel that, by-passing the
+-- normal thalamus → cortex → amygdala flow, immediately binds an
+-- incoming content type to a stored valence + an episodic memory
+-- pointer. Useful for input modalities where the brain decides this
+-- pattern is too primal for the standard W(m) gate.
+--
+-- Phase 1 ships:
+--   olfactory_imprints — direct (content_hash, valence, memory_id)
+--                        bindings that bypass standard write gates
+--   olfactory_state — single row tracking total imprints + rate
+--
+-- Phase 2 wires olfactory_imprint into amygdala_tag for the bypass
+-- path. Phase 3 lets olfactory_query return bound memories directly
+-- (Proust-style fast emotional recall).
+--
+-- Rollback:
+--   DROP TABLE IF EXISTS olfactory_imprints;
+--   DROP TABLE IF EXISTS olfactory_state;
+--   DELETE FROM schema_version WHERE version = 82;
+--
+-- IDEMPOTENT.
+
+CREATE TABLE IF NOT EXISTS olfactory_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    total_imprints INTEGER NOT NULL DEFAULT 0,
+    enforcement_mode TEXT NOT NULL DEFAULT 'shadow' CHECK(enforcement_mode IN (
+        'shadow', 'enforce', 'disabled'
+    )),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+);
+INSERT OR IGNORE INTO olfactory_state (id) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS olfactory_imprints (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    imprinted_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+    content_hash TEXT NOT NULL,
+    content_kind TEXT,           -- e.g. 'text_pattern', 'entity_name', 'phrase'
+    valence REAL NOT NULL CHECK(valence BETWEEN -1.0 AND 1.0),
+    arousal REAL NOT NULL DEFAULT 0.5 CHECK(arousal BETWEEN 0.0 AND 1.0),
+    bound_memory_id INTEGER,     -- optional memory pointer this imprint resurrects
+    bound_entity_id INTEGER,     -- optional entity pointer
+    agent_id TEXT,
+    times_recalled INTEGER NOT NULL DEFAULT 0,
+    last_recalled_at TEXT,
+    notes TEXT,
+    UNIQUE (content_hash, agent_id)
+);
+CREATE INDEX IF NOT EXISTS idx_oi_recent ON olfactory_imprints(imprinted_at);
+CREATE INDEX IF NOT EXISTS idx_oi_content ON olfactory_imprints(content_hash);
+CREATE INDEX IF NOT EXISTS idx_oi_valence ON olfactory_imprints(valence);

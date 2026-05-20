@@ -110,16 +110,6 @@ def upgraded_db(tmp_path):
     return p
 
 
-@pytest.mark.xfail(
-    reason=(
-        "init_schema.sql has not yet been regenerated after migrations "
-        "067-082 landed in the 2026-05-20 brain-region consolidation. The "
-        "16 new brain-subsystem tables are present after upgrade but "
-        "missing from a fresh install. Regenerating init_schema.sql is a "
-        "maintainer release task and tracked as a follow-up."
-    ),
-    strict=False,
-)
 def test_fresh_install_and_upgraded_install_produce_identical_schemas(
     fresh_db, upgraded_db
 ):

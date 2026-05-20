@@ -22,9 +22,68 @@ Author: claude (consolidation pass 2026-05-20)
 """
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 from mcp.types import Tool
+
+
+# Handlers in this codebase use one of three signature shapes:
+#   1. `fn(args: dict) -> dict` — extension-module `_call_*` handlers
+#      (mcp_tools_lifecycle, mcp_tools_reflexion, …). Single positional dict.
+#   2. `fn(**kwargs) -> dict` — `tool_*` functions in mcp_server.py and most
+#      brain-region modules. Keyword arguments.
+#   3. `fn()` — a small handful of zero-arg tools (stats, weights, health, …).
+# `_call_by_name` introspects the signature once per call and routes to the
+# right shape. Caches the choice so the inspect cost is paid once per handler.
+# Key by the function object itself (not id()) because id() is recycled
+# for short-lived test closures, which made tests pollute each other.
+_SIG_KIND_CACHE: dict[Any, str] = {}
+
+
+def _signature_kind(fn: Any) -> str:
+    """Return one of "single_dict" / "kwargs" / "zero" based on fn's signature.
+
+    Treats a single non-self positional parameter named `arguments` /
+    `args` / `payload` / `params` / `kwargs_dict` as a single-dict
+    handler. Everything else is kwargs-shape. Zero-arg handlers are
+    detected separately.
+    """
+    cached = _SIG_KIND_CACHE.get(fn)
+    if cached is not None:
+        return cached
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        kind = "kwargs"
+        try:
+            _SIG_KIND_CACHE[fn] = kind
+        except TypeError:
+            pass
+        return kind
+    params = [
+        p for p in sig.parameters.values()
+        if p.name not in ("self", "cls")
+    ]
+    if not params:
+        kind = "zero"
+    elif (
+        len(params) == 1
+        and params[0].kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.POSITIONAL_ONLY,
+        )
+        and params[0].default is inspect.Parameter.empty
+        and params[0].name in ("arguments", "args", "payload", "params", "kwargs_dict")
+    ):
+        kind = "single_dict"
+    else:
+        kind = "kwargs"
+    try:
+        _SIG_KIND_CACHE[fn] = kind
+    except TypeError:
+        pass
+    return kind
 
 
 # ---------------------------------------------------------------- runtime dispatch map
@@ -100,10 +159,24 @@ def _call_by_name(tool_name: str, payload: dict[str, Any] | None) -> dict[str, A
     fn = disp.get(tool_name)
     if fn is None:
         return {"error": f"underlying tool {tool_name!r} not found in dispatch (consolidated routing miss)"}
+    args = payload or {}
+    kind = _signature_kind(fn)
     try:
-        return fn(**(payload or {}))
+        if kind == "single_dict":
+            return fn(args)
+        if kind == "zero":
+            return fn()
+        return fn(**args)
     except TypeError as exc:
-        return {"error": f"argument mismatch calling {tool_name!r}: {exc}"}
+        # Last-resort fallback: try the other shape before surfacing the error.
+        # Covers handlers whose param is named idiosyncratically and got
+        # misclassified as kwargs (or vice versa).
+        try:
+            if kind == "kwargs":
+                return fn(args)
+            return fn(**args)
+        except TypeError:
+            return {"error": f"argument mismatch calling {tool_name!r}: {exc}"}
 
 
 # ---------------------------------------------------------------- routing tables
@@ -158,6 +231,7 @@ _EMIT_ROUTE: dict[tuple[str, str], str] = {
     ("sleep",        "advance"):             "sleep_advance",
     ("sleep",        "operation_permitted"): "sleep_operation_permitted",
     ("vta",          "fire"):                "vta_fire",
+    ("vta",          "pathways"):            "vta_pathways",
     ("septum",       "tick"):                "septum_tick",
     ("septum",       "phase_lock"):          "septum_phase_lock",
     ("septum",       "query_bin"):           "septum_query_bin",

@@ -65,6 +65,20 @@ class TestResolveAllowedTools:
         assert "not_a_real_tool" in msg
         assert "BRAINCTL_ALLOWED_TOOLS" in msg
 
+    def test_v1_deprecated_name_hard_exits(self, monkeypatch):
+        """Post-v2: an allowlist containing only v1-deprecated names
+        would silently empty the visible surface. Hard-fail instead, so
+        a stale Antigravity / harness allowlist surfaces during start
+        rather than presenting as a broken zero-tool client."""
+        deprecated_sample = next(iter(mcp_server._V2_DEPRECATED))
+        monkeypatch.setenv("BRAINCTL_ALLOWED_TOOLS", deprecated_sample)
+        with pytest.raises(SystemExit) as exc_info:
+            mcp_server._resolve_allowed_tools()
+        msg = str(exc_info.value)
+        assert deprecated_sample in msg
+        assert "deprecated" in msg.lower()
+        assert "TOOL_MIGRATION_V2" in msg
+
     def test_typo_gets_did_you_mean_suggestion(self, monkeypatch):
         """memory-add (hyphen) should suggest memory_add (underscore)."""
         monkeypatch.setenv("BRAINCTL_ALLOWED_TOOLS", "memory-add")

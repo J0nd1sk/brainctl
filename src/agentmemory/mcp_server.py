@@ -3202,8 +3202,10 @@ _VISIBLE_TOOL_NAMES: frozenset[str] = _ALL_TOOL_NAMES - _V2_DEPRECATED
 
 def _resolve_allowed_tools() -> frozenset[str] | None:
     """Read BRAINCTL_ALLOWED_TOOLS at startup. Returns None when unset
-    (full surface exposed). Returns a non-empty frozenset of valid tool
-    names when set. Hard-fails with a clear message on unknown names.
+    (visible surface exposed). Returns a non-empty frozenset of valid
+    tool names when set. Hard-fails with a clear message on unknown
+    names AND on v1-deprecated names (post-v2 consolidation), so a
+    stale allowlist can't silently shrink the surface to zero.
     """
     raw = os.environ.get("BRAINCTL_ALLOWED_TOOLS", "").strip()
     if not raw:
@@ -3212,22 +3214,26 @@ def _resolve_allowed_tools() -> frozenset[str] | None:
     if not requested:
         return None
     unknown = requested - _ALL_TOOL_NAMES
-    if unknown:
-        # Suggest the closest valid match for each unknown name (helps
-        # catch typos like memory-add vs memory_add).
+    deprecated = (requested & _V2_DEPRECATED) - unknown
+    if unknown or deprecated:
         import difflib
 
-        hints = []
+        hints: list[str] = []
         for name in sorted(unknown):
-            close = difflib.get_close_matches(name, sorted(_ALL_TOOL_NAMES), n=1, cutoff=0.6)
+            close = difflib.get_close_matches(name, sorted(_VISIBLE_TOOL_NAMES), n=1, cutoff=0.6)
             if close:
                 hints.append(f"    {name!r} → did you mean {close[0]!r}?")
             else:
                 hints.append(f"    {name!r} → no close match")
+        for name in sorted(deprecated):
+            hints.append(
+                f"    {name!r} → deprecated in v2 consolidation; call the "
+                f"corresponding dispatcher (see docs/TOOL_MIGRATION_V2.md)"
+            )
         msg = (
-            "BRAINCTL_ALLOWED_TOOLS contains unknown tool names. brainctl "
-            "exposes 201 tools (see `brainctl-mcp --list-tools`). Unknown:\n"
-            + "\n".join(hints)
+            f"BRAINCTL_ALLOWED_TOOLS contains tool names that are not in "
+            f"the visible v2 surface ({len(_VISIBLE_TOOL_NAMES)} tools; "
+            f"see `brainctl-mcp --list-tools`).\n" + "\n".join(hints)
         )
         raise SystemExit(msg)
     return requested
@@ -3466,13 +3472,16 @@ async def main():
     if "--help" in sys.argv or "-h" in sys.argv:
         print(__doc__)
         print("\nFlags:")
-        print("  --list-tools    Print all available tools and exit")
+        print("  --list-tools    Print visible v2 tools (use --all for full v1+v2 surface)")
         print("  --doctor        Diagnose installation and configuration")
         print("  --doctor --json Also output JSON results")
         return
 
     if "--list-tools" in sys.argv:
+        show_all = "--all" in sys.argv
         for t in TOOLS:
+            if not show_all and t.name not in _VISIBLE_TOOL_NAMES:
+                continue
             print(f"  {t.name}: {t.description[:80]}")
         return
 
