@@ -72,9 +72,26 @@ jobs:
       - name: Report SQLite version
         run: python -c "import sqlite3; print('sqlite_version:', sqlite3.sqlite_version)"
       - name: Smoke — brainctl init on Windows
+        # Invoke via the console-script entry point (defined in
+        # pyproject.toml as `brainctl = agentmemory.cli:main`). `python
+        # -m agentmemory` does NOT work because the package has no
+        # `__main__.py`.
+        shell: pwsh
         run: |
-          python -m agentmemory init --path "${{ runner.temp }}\brain.db"
-          python -c "import sqlite3; c = sqlite3.connect(r'${{ runner.temp }}\brain.db'); print('integrity:', c.execute('PRAGMA integrity_check').fetchall()); print('bg_modulators:', c.execute('SELECT * FROM bg_modulators').fetchall())"
+          $db = "${{ runner.temp }}\brain.db"
+          brainctl init --path "$db"
+          if (-not (Test-Path "$db")) { Write-Error "brainctl init did not create $db"; exit 1 }
+          $py = @"
+          import sqlite3, sys
+          c = sqlite3.connect(r'$db')
+          integrity = c.execute('PRAGMA integrity_check').fetchall()
+          rows = c.execute('SELECT * FROM bg_modulators').fetchall()
+          print('integrity:', integrity)
+          print('bg_modulators:', rows)
+          assert integrity == [('ok',)], f'integrity_check FAIL: {integrity}'
+          assert rows and rows[0][4] == 0.5, f'acetylcholine column FAIL: {rows}'
+          "@
+          python -c $py
       - name: Smoke — core test subset (no native-extra deps)
         run: |
           pytest tests/test_mcp_allowed_tools.py tests/test_mcp_tools_consolidated.py tests/test_schema_parity.py tests/test_fk_integrity_triggers.py tests/test_mcp_tools_health.py -v
