@@ -5,6 +5,60 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added — issue #116 Phase 1-A: retrieval pathway log
+
+External architecture memo (issue #116, "Thalamus, Basal Ganglia, and
+Cerebellum: Toward a Biologically Grounded Architecture for brainctl",
+by Claude + @crystalwizard) was audited against shipped reality at
+v2.7.0 plus the final brain batch (migrations 050-065). Most of the
+memo's proposed feedback-loop infrastructure is already shipped —
+`bg_td_events` is the TD-error broadcast bus, `bg_striatal_weights`
+hold 5-expectile distributional value (richer than the memo's
+proposed `(m, s)`), `cerebellum_modules.oculomotor_partner` predicts
+retrieval relevance, and the actor-critic loop runs on every
+dispatch in shadow mode. The audit + comparison live in
+`research/issue-116-audit-vs-origin-main.md` and
+`research/issue-116-comparison.md`.
+
+The real residual gap is **pathway-fingerprint indexability**: the
+BG learns at `(action, context_hash)` granularity, but cannot
+distinguish FTS-mode from vector-mode from hybrid-RRF-mode retrievals
+because that distinction lives inside the `memory_search` arguments,
+not in any indexed field. This release closes that gap.
+
+- **Migration 066** — `retrieval_pathway_log` table. One row per
+  `cmd_search` invocation. Records: mode (`fts` / `hybrid-rrf` /
+  `vector`), `table_distribution` (which tables produced hits), the
+  `tables_searched` set after intent-router + profile routing,
+  candidate counts, latency, intent label, active profile, embedding
+  model version, and a query hash for cluster lookup. Schema also
+  reserves `rrf_contribution_ratio`, `suppressed_strategies`, and a
+  loose `linked_td_event_id` for Phase 1-B+ and later joiners. Five
+  indexes (recent, agent+time, mode+time, intent+time, unlinked).
+
+- **`agentmemory.retrieval_pathway_log`** — new module with
+  `emit_pathway_log(...)` and `table_distribution_from_results(...)`.
+  Best-effort: never raises, never blocks. Gated behind
+  `BRAINCTL_PATHWAY_LOG=0` env-var kill switch.
+
+- **`cmd_search` hookpoint** — one new emit call near the output
+  assembly site. Pre-hook `db.commit()` releases the implicit
+  writer transaction that `get_db()`'s `isolation_level=""` opens
+  on prior DML (access_log / salience updates), so the pathway-log
+  helper's separate autocommit connection isn't locked out in WAL
+  mode. `db_path` is plumbed through so programmatic callers
+  (`Brain.search` against a custom DB) log to their own store.
+
+- **Tests** — `tests/test_retrieval_pathway_log.py`. 5 tests covering
+  schema, emission, kill switch, missing-table degradation, and the
+  table_distribution helper.
+
+Phase 1-B (motivational entry gate composition) and Phase 1-C
+(smooth sigmoid read-gate threshold) are planned follow-ups.
+Phase 4 enforcement readiness review is gated on accumulating 4+
+weeks of pathway data before deciding whether the BG/cerebellum
+loops are calibrated enough to flip from shadow to enforcement.
+
 ## [2.7.0] — 2026-05-13 — *Procedural memory layer (Velamj, PR #94)*
 
 The third memory type. brainctl now treats Tulving's 1972 tripartite

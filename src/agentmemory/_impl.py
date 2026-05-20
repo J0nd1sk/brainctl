@@ -6189,6 +6189,11 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
     """
     if db is None:
         db = get_db()
+    # Issue #116 Phase 1-A: pathway-log emission needs a wall-clock anchor at
+    # function entry so latency_ms can be measured at the exit site. time.monotonic()
+    # is the right clock here — wall-clock skews under NTP adjustments.
+    import time as _time
+    _rpl_start_ns = _time.monotonic_ns()
     query = args.query
     limit = args.limit or 10
     no_recency = getattr(args, "no_recency", False)
@@ -7509,6 +7514,57 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
         _out["_debug"] = _debug_out
     elif _debug_mode:
         _out["_debug"] = {"all_signals_informative": True}
+
+    # Issue #116 Phase 1-A: emit one row to retrieval_pathway_log capturing the
+    # pathway fingerprint of this retrieval. Best-effort; never blocks the
+    # return path. Gated behind BRAINCTL_PATHWAY_LOG env var. See
+    # research/issue-116-audit-vs-origin-main.md for the design rationale.
+    #
+    # Why we commit `db` first: get_db() returns isolation_level="" which
+    # auto-BEGINs on any DML. cmd_search has typically written to access_log
+    # / salience / recency tracking by this point, so the shared connection
+    # is mid-transaction and holds a writer lock. emit_pathway_log opens a
+    # separate autocommit connection (deliberately, to keep the helper
+    # decoupled from the caller's transaction state); without committing
+    # `db` first, that second connection collides on the writer lock
+    # even in WAL mode and fails with "database is locked". Committing
+    # here is benign for cmd_search — by this site all retrieval logic is
+    # complete and the remainder of the function only formats output.
+    try:
+        if db.in_transaction:
+            db.commit()
+    except Exception:
+        pass
+    try:
+        from agentmemory.retrieval_pathway_log import (
+            emit_pathway_log as _rpl_emit,
+            table_distribution_from_results as _rpl_table_dist,
+        )
+        _rpl_latency_ms = max(0, int((_time.monotonic_ns() - _rpl_start_ns) // 1_000_000))
+        _rpl_intent_label = (
+            _intent_result.intent if _intent_result is not None else None
+        )
+        _rpl_emit(
+            agent_id=getattr(args, "agent", None) or _rollout_agent,
+            project=getattr(args, "project", None) or getattr(args, "scope", None),
+            query=query,
+            mode=mode,
+            table_distribution=_rpl_table_dist(results),
+            tables_searched=tables,
+            candidate_count_post=sum(
+                len(v) for v in results.values() if isinstance(v, list)
+            ),
+            intent_label=_rpl_intent_label,
+            active_profile=getattr(args, "profile", None),
+            embedding_model_version=f"{EMBED_MODEL}:{EMBED_DIMENSIONS}",
+            latency_ms=_rpl_latency_ms,
+            benchmark_mode=benchmark_mode,
+            db_path=db_path,
+        )
+    except Exception:  # pragma: no cover — defensive
+        # Import errors or any other unexpected issue must not break search.
+        pass
+
     _ofmt = getattr(args, "output", "json")
     if _ofmt == "return":
         return _out
