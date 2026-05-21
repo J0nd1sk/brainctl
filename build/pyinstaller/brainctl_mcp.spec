@@ -14,7 +14,23 @@ a = Analysis(
     [str(project_root / "src" / "agentmemory" / "mcp_server.py")],
     pathex=[str(project_root / "src")],
     binaries=[],
-    datas=[],
+    # Ship the schema bootstrapper so a fresh brain.db gets initialized on
+    # first launch. _ensure_db_initialized() in mcp_server.py resolves both
+    # init_schema.sql and the migrations/ directory via sys._MEIPASS at
+    # runtime; without these datas entries the lookup falls back to the
+    # repo checkout (only correct for dev installs, never for a packaged
+    # sidecar binary like the one Mantic ships).
+    #
+    # Destination layout inside the bundle:
+    #   _MEIPASS/agentmemory/db/init_schema.sql
+    #   _MEIPASS/db/migrations/*.sql
+    # which mirrors the layouts that migrate.py and _ensure_db_initialized
+    # already probe for in package-relative and repo-relative variants.
+    datas=[
+        (str(project_root / "src" / "agentmemory" / "db" / "init_schema.sql"),
+         "agentmemory/db"),
+        (str(project_root / "db" / "migrations"), "db/migrations"),
+    ],
     hiddenimports=[
         "sqlite3",
     ],

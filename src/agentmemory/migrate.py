@@ -68,7 +68,26 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 
-MIGRATIONS_DIR = Path(__file__).parent.parent.parent / "db" / "migrations"
+def _resolve_migrations_dir() -> Path:
+    """Locate db/migrations/ in dev checkout AND PyInstaller bundle layouts.
+
+    Dev / pip-editable install: SQL files live at <repo>/db/migrations/.
+    PyInstaller onefile bundle (brainctl-mcp sidecar): files are extracted
+    to ``sys._MEIPASS/db/migrations/`` via the ``datas=`` entry in
+    build/pyinstaller/brainctl_mcp.spec. Without the _MEIPASS branch the
+    runner falls back to a non-existent path under the bundle's temp
+    extraction root and silently reports zero pending migrations.
+    """
+    import sys as _sys
+    meipass = getattr(_sys, "_MEIPASS", None)
+    if meipass:
+        bundled = Path(meipass) / "db" / "migrations"
+        if bundled.exists():
+            return bundled
+    return Path(__file__).parent.parent.parent / "db" / "migrations"
+
+
+MIGRATIONS_DIR = _resolve_migrations_dir()
 
 
 # Errors that mean "this DDL already happened, treat as no-op". Matched

@@ -3508,8 +3508,149 @@ async def main():
         await app.run(read_stream, write_stream, app.create_initialization_options())
 
 
+def _ensure_db_initialized() -> None:
+    """Bootstrap brain.db on startup so first-tool-call never sees an empty schema.
+
+    Background: `brainctl-mcp` is the canonical MCP entry point used by Mantic,
+    Claude Desktop, and other hosts that don't drive the `brainctl` CLI. Those
+    hosts can legitimately point us at a brand-new path (or an empty zero-byte
+    file Mantic touched during sidecar setup), so the first `memory_add` would
+    historically fail with ``no such table: agents``. We mirror the behaviour
+    of ``brainctl init`` + ``brainctl migrate`` here:
+
+      * agents table missing  -> apply init_schema.sql, seed required rows,
+                                  then run pending migrations
+      * agents table present  -> just run pending migrations (idempotent;
+                                  ``migrate.run`` short-circuits with "Already
+                                  up to date" on the fast path)
+
+    Everything logs to stderr — stdout is reserved for MCP JSON-RPC. On
+    failure we exit non-zero rather than serving a broken transport.
+    """
+    # Re-resolve in case BRAINCTL_DB / BRAIN_DB / BRAINCTL_HOME was set after
+    # module import (e.g. by a wrapper script).
+    db_path = get_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=10)
+        try:
+            has_agents_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agents' LIMIT 1"
+            ).fetchone() is not None
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError as exc:
+        print(f"brainctl-mcp: cannot open {db_path}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if not has_agents_table:
+        # Locate init_schema.sql (package-relative for pip/wheel installs,
+        # repo-relative for dev checkouts and the PyInstaller bundle).
+        # Probe order:
+        #   1. PyInstaller bundle extraction (_MEIPASS), where the spec
+        #      copies init_schema.sql under agentmemory/db/.
+        #   2. pip / wheel install — sits next to mcp_server.py.
+        #   3. Dev checkout repo root.
+        #   4. Last-ditch user-home fallback for dev installs that haven't
+        #      been ``pip install -e``'d yet.
+        _meipass = getattr(sys, "_MEIPASS", None)
+        schema_locations = []
+        if _meipass:
+            schema_locations.append(Path(_meipass) / "agentmemory" / "db" / "init_schema.sql")
+        schema_locations.extend([
+            Path(__file__).parent / "db" / "init_schema.sql",
+            Path(__file__).parent.parent.parent / "db" / "init_schema.sql",
+            Path.home() / "agentmemory" / "db" / "init_schema.sql",
+        ])
+        schema_sql = None
+        for loc in schema_locations:
+            if loc.exists():
+                schema_sql = loc.read_text(encoding="utf-8")
+                break
+        if schema_sql is None:
+            print(
+                "brainctl-mcp: init_schema.sql not found in any of "
+                f"{[str(p) for p in schema_locations]}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        print(
+            f"brainctl-mcp: bootstrapping fresh brain.db at {db_path}",
+            file=sys.stderr,
+        )
+        try:
+            conn = sqlite3.connect(str(db_path))
+            try:
+                conn.executescript(schema_sql)
+                # Seed rows triggers + commands depend on. Mirrors cmd_init
+                # in _impl.py — keep these in sync if either side changes.
+                seed_sql = """
+                    INSERT OR IGNORE INTO workspace_config (key, value) VALUES ('enabled', '0');
+                    INSERT OR IGNORE INTO workspace_config (key, value) VALUES ('ignition_threshold', '0.7');
+                    INSERT OR IGNORE INTO workspace_config (key, value) VALUES ('urgent_threshold', '0.9');
+                    INSERT OR IGNORE INTO workspace_config (key, value) VALUES ('governor_max_per_hour', '5');
+                    INSERT OR IGNORE INTO neuromodulation_state (id, org_state, dopamine_signal, arousal_level,
+                        confidence_boost_rate, confidence_decay_rate, retrieval_breadth_multiplier,
+                        focus_level, temporal_lambda, context_window_depth)
+                        VALUES (1, 'normal', 0.0, 0.3, 0.1, 0.02, 1.0, 0.3, 0.03, 50);
+                """
+                try:
+                    conn.executescript(seed_sql)
+                except sqlite3.OperationalError:
+                    # Minimal schema snapshots may legitimately omit one of
+                    # these tables; migrations will catch up.
+                    pass
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:
+            print(
+                f"brainctl-mcp: failed to apply init_schema.sql at {db_path}: {exc}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    # Always run migrations — they're idempotent and the snapshot lags HEAD
+    # by design (regenerating init_schema.sql on every migration release is
+    # a maintainer foot-gun, per the note in cmd_init).
+    try:
+        from agentmemory import migrate as _mig
+        summary = _mig.run(str(db_path), dry_run=False, backup=False)
+    except Exception as exc:
+        print(
+            f"brainctl-mcp: migration runner crashed for {db_path}: {exc}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not summary.get("ok"):
+        print(
+            f"brainctl-mcp: migration failed for {db_path}: "
+            f"{summary.get('errors') or summary}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    applied = summary.get("applied", 0)
+    if applied:
+        print(
+            f"brainctl-mcp: applied {applied} migration(s) to {db_path}",
+            file=sys.stderr,
+        )
+
+
 def run():
     """Synchronous entry point for pyproject.toml console_scripts."""
+    # Skip schema bootstrap for inspection-only flags. Migrating on
+    # ``--help`` / ``--list-tools`` / ``--doctor`` would silently mutate the
+    # user's brain.db (e.g. applying pending migrations) every time an
+    # operator inspects the binary, which is a footgun. ``--doctor`` in
+    # particular is supposed to *diagnose* the DB state, not change it.
+    inspection_flags = {"--help", "-h", "--list-tools", "--doctor"}
+    if not (set(sys.argv) & inspection_flags):
+        _ensure_db_initialized()
     import asyncio
     asyncio.run(main())
 
