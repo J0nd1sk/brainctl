@@ -2,9 +2,12 @@ __pycache__/
 *.pyc
 *.pyo
 .venv/
+.venv-bundle/
 *.egg-info/
 dist/
-build/
+build/*
+# Keep PyInstaller spec source (not a build artifact)
+!build/pyinstaller/
 db/brain.db
 db/brain.db-wal
 db/brain.db-shm
