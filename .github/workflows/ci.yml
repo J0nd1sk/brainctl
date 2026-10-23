@@ -17,9 +17,22 @@ jobs:
   # --------------------------------------------------------------------------
   test:
     runs-on: ubuntu-latest
+    name: test (py${{ matrix.python-version }}, mcp ${{ matrix.mcp-label }})
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
+        # Exercise both ends of the supported MCP SDK range so a future
+        # mcp release that breaks mcp_server.py surfaces in CI rather than
+        # in a user install. The main axis resolves the latest allowed 1.x;
+        # the floor (`mcp==1.27.0`, the lower bound in pyproject.toml) runs
+        # on a single Python version to keep the matrix small.
+        mcp-label: ["latest-1.x"]
+        mcp-spec: ["mcp>=1.27.0,<2.0.0"]
+        include:
+          - python-version: "3.12"
+            mcp-label: "floor-1.27.0"
+            mcp-spec: "mcp==1.27.0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Set up Python ${{ matrix.python-version }}
@@ -27,10 +40,18 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
+        env:
+          MCP_SPEC: ${{ matrix.mcp-spec }}
         run: |
           python -m pip install --upgrade pip
-          pip install -e '.[all]'
+          pip install -e '.[all]' "$MCP_SPEC"
           pip install pytest
+      - name: Report MCP SDK version
+        run: python -c "import importlib.metadata as m; print('mcp', m.version('mcp'))"
+      - name: MCP tool surface smoke
+        run: |
+          python -m agentmemory.mcp_server --list-tools > "$RUNNER_TEMP/mcp-tools.txt"
+          echo "visible MCP tools: $(wc -l < "$RUNNER_TEMP/mcp-tools.txt")"
       - name: Run tests
         run: pytest tests/ -v
 
