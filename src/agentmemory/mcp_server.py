@@ -374,28 +374,37 @@ def _ensure_fts_index_consistent(conn) -> bool:
 _SCOPED_FTS_UPDATE_TRIGGERS = """
 DROP TRIGGER IF EXISTS memories_fts_update_delete;
 DROP TRIGGER IF EXISTS memories_fts_update_insert;
-CREATE TRIGGER memories_fts_update_delete AFTER UPDATE OF content, category, tags, indexed, retired_at ON memories WHEN old.indexed = 1 BEGIN
-    INSERT INTO memories_fts(memories_fts, rowid, content, category, tags)
-    VALUES ('delete', old.id, old.content, old.category, old.tags);
-END;
 CREATE TRIGGER memories_fts_update_insert AFTER UPDATE OF content, category, tags, indexed, retired_at ON memories WHEN new.indexed = 1 AND new.retired_at IS NULL BEGIN
     INSERT INTO memories_fts(rowid, content, category, tags)
     VALUES (new.id, new.content, new.category, new.tags);
+END;
+CREATE TRIGGER memories_fts_update_delete AFTER UPDATE OF content, category, tags, indexed, retired_at ON memories WHEN old.indexed = 1 BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content, category, tags)
+    VALUES ('delete', old.id, old.content, old.category, old.tags);
 END;
 """
 
 
 def _ensure_fts_triggers_scoped(conn) -> bool:
-    """Replace legacy unscoped memories_fts update triggers with column-scoped
-    ones (issue #152). Idempotent; returns True only if it rewrote them."""
+    """Replace legacy unscoped or mis-ordered memories_fts update triggers
+    (issue #152). SQLite fires same-event triggers newest-first, so the
+    insert leg must be created before the delete leg. Idempotent; returns
+    True only if it rewrote them."""
     try:
         rows = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='trigger' "
-            "AND name IN ('memories_fts_update_delete', 'memories_fts_update_insert')"
+            "SELECT name, sql FROM sqlite_master WHERE type='trigger' "
+            "AND name IN ('memories_fts_update_delete', 'memories_fts_update_insert') "
+            "ORDER BY rowid"
         ).fetchall()
     except sqlite3.Error:
         return False
-    if not rows or all(r[0] and "AFTER UPDATE OF" in r[0].upper() for r in rows):
+    if not rows:
+        return False
+    scoped = all(r[1] and "AFTER UPDATE OF" in r[1].upper() for r in rows)
+    ordered = [r[0] for r in rows] == [
+        "memories_fts_update_insert", "memories_fts_update_delete"
+    ]
+    if scoped and ordered:
         return False
     try:
         conn.executescript(_SCOPED_FTS_UPDATE_TRIGGERS)

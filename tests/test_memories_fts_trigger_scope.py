@@ -184,3 +184,60 @@ def test_delete_removes_from_fts(conn):
     conn.execute("DELETE FROM memories WHERE id = ?", (mid,))
     conn.commit()
     assert _match(conn, "kelly") == 0, "deleted memory still in FTS index"
+
+
+# --- trigger firing order (migration 085) ---
+# SQLite fires same-event triggers newest-first. With the delete leg created
+# first, an UPDATE that leaves content unchanged re-inserted then deleted the
+# row's tokens, so the memory vanished from search.
+
+def test_category_only_update_keeps_content_indexed(conn):
+    mid = _add(conn, "deploy target flyio", category="catold")
+    conn.commit()
+    _rebuild(conn)
+    assert _match(conn, "flyio") == 1
+
+    conn.execute("UPDATE memories SET category = 'catnew' WHERE id = ?", (mid,))
+    conn.commit()
+    assert _match(conn, "flyio") == 1, "category-only update dropped content from FTS"
+    assert _match(conn, "catnew") == 1
+    assert _match(conn, "catold") == 0
+    assert _integrity_ok(conn)
+
+
+def test_same_text_content_rewrite_keeps_row_indexed(conn):
+    mid = _add(conn, "kelly village rewrite")
+    conn.commit()
+    _rebuild(conn)
+
+    conn.execute("UPDATE memories SET content = content WHERE id = ?", (mid,))
+    conn.commit()
+    assert _match(conn, "kelly") == 1, "same-text rewrite dropped row from FTS"
+    assert _integrity_ok(conn)
+
+
+def test_self_heal_reorders_misordered_triggers(conn):
+    from agentmemory.mcp_server import _ensure_fts_triggers_scoped
+
+    assert _ensure_fts_triggers_scoped(conn) is False  # fresh schema is correct
+
+    # Recreate the pre-085 (delete-first) ordering.
+    sql = {
+        r["name"]: r["sql"]
+        for r in conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='trigger' "
+            "AND name LIKE 'memories_fts_update_%'"
+        )
+    }
+    conn.execute("DROP TRIGGER memories_fts_update_insert")
+    conn.execute("DROP TRIGGER memories_fts_update_delete")
+    conn.execute(sql["memories_fts_update_delete"])
+    conn.execute(sql["memories_fts_update_insert"])
+    conn.commit()
+
+    assert _ensure_fts_triggers_scoped(conn) is True
+    mid = _add(conn, "deploy target flyio")
+    conn.commit()
+    conn.execute("UPDATE memories SET category = 'environment' WHERE id = ?", (mid,))
+    conn.commit()
+    assert _match(conn, "flyio") == 1
