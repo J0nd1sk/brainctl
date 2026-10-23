@@ -1,0 +1,144 @@
+{
+  "by_kind": {
+    "answerable": {
+      "count": 14,
+      "empty_result_rate": 0.0,
+      "metacognition_tiers": {
+        "1": 3,
+        "2": 11
+      },
+      "top_raw_score": {
+        "max": 23.082804,
+        "mean": 12.051973,
+        "median": 10.682892,
+        "min": 7.022516,
+        "n": 14,
+        "p25": 9.022827,
+        "p75": 14.013038
+      },
+      "top_score": {
+        "max": 1.1,
+        "mean": 1.1,
+        "median": 1.1,
+        "min": 1.1,
+        "n": 14,
+        "p25": 1.1,
+        "p75": 1.1
+      }
+    },
+    "near_topic": {
+      "count": 14,
+      "empty_result_rate": 0.0,
+      "metacognition_tiers": {
+        "1": 1,
+        "2": 13
+      },
+      "top_raw_score": {
+        "max": 15.665733,
+        "mean": 7.469677,
+        "median": 7.085901,
+        "min": 3.640358,
+        "n": 14,
+        "p25": 6.535741,
+        "p75": 7.648404
+      },
+      "top_score": {
+        "max": 1.1,
+        "mean": 1.1,
+        "median": 1.1,
+        "min": 1.1,
+        "n": 14,
+        "p25": 1.1,
+        "p75": 1.1
+      }
+    },
+    "off_topic": {
+      "count": 2,
+      "empty_result_rate": 1.0,
+      "metacognition_tiers": {
+        "4": 2
+      },
+      "top_raw_score": {
+        "max": 0.0,
+        "mean": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "n": 2,
+        "p25": 0.0,
+        "p75": 0.0
+      },
+      "top_score": {
+        "max": 0.0,
+        "mean": 0.0,
+        "median": 0.0,
+        "min": 0.0,
+        "n": 2,
+        "p25": 0.0,
+        "p75": 0.0
+      }
+    }
+  },
+  "implicit_empty_result_abstention": {
+    "abstention_f1": 0.2222,
+    "abstention_precision": 1.0,
+    "abstention_recall": 0.125,
+    "false_abstention_rate": 0.0
+  },
+  "k": 5,
+  "overall": {
+    "abstention_f1": 0.0,
+    "abstention_precision": 0.0,
+    "abstention_recall": 0.0,
+    "answerability_source": "placeholder_all_answerable",
+    "answerable_p_at_1": 1.0,
+    "answerable_recall_at_k": 1.0,
+    "false_abstention_rate": 0.0,
+    "n_answerable": 14,
+    "n_queries": 30,
+    "n_unanswerable": 16,
+    "raw_score_auroc": 0.8683,
+    "score_auroc": 0.5625,
+    "unanswerable_nonempty_rate": 0.875
+  },
+  "suite": "abstention",
+  "top_raw_score": {
+    "answerable": {
+      "max": 23.082804,
+      "mean": 12.051973,
+      "median": 10.682892,
+      "min": 7.022516,
+      "n": 14,
+      "p25": 9.022827,
+      "p75": 14.013038
+    },
+    "unanswerable": {
+      "max": 15.665733,
+      "mean": 6.535967,
+      "median": 7.022516,
+      "min": 0.0,
+      "n": 16,
+      "p25": 3.76162,
+      "p75": 7.533819
+    }
+  },
+  "top_score": {
+    "answerable": {
+      "max": 1.1,
+      "mean": 1.1,
+      "median": 1.1,
+      "min": 1.1,
+      "n": 14,
+      "p25": 1.1,
+      "p75": 1.1
+    },
+    "unanswerable": {
+      "max": 1.1,
+      "mean": 0.9625,
+      "median": 1.1,
+      "min": 0.0,
+      "n": 16,
+      "p25": 1.1,
+      "p75": 1.1
+    }
+  }
+}
