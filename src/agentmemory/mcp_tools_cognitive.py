@@ -1,6 +1,11 @@
 """brainctl MCP tools — cognitive profile + special-interest tagging + sensory affect.
 
-Five MCP tools, all backed by the migration-086 schema additions:
+Six MCP handlers, all backed by the migration-086 schema additions. They
+are hidden from the v2 visible surface (listed in
+mcp_tools_consolidated.DEPRECATED_TOOL_NAMES) and reached through the
+admin dispatchers: agent_admin(action=cognition_list|cognition_show|
+cognition_set|affect_log_sensory) and entity_admin(action=interest_add|
+interest_list).
 
   cognition_list           list built-in cognitive profiles
   cognition_show           show one profile's tunables

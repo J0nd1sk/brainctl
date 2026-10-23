@@ -165,20 +165,24 @@ brainctl memory search <q> --focus <name|scope>  # monotropic boost
 
 ## MCP surface
 
-Six tools, in the new `mcp_tools_cognitive.py` extension module:
+Six handlers live in the `mcp_tools_cognitive.py` extension module. They
+are not top-level tools: to keep the v2 surface at 100 visible tools (see
+`docs/TOOL_MIGRATION_V2.md`) they are reached through the existing admin
+dispatchers. `agent_id` must be passed inside `payload` where required.
 
-  - `cognition_list`
-  - `cognition_show`
-  - `cognition_set`
-  - `interest_add`
-  - `interest_list`
-  - `affect_log_sensory` — writes an affect row carrying per-channel
-    `sensory_dimensions` and emits a `sensory_overload` event when
+  - `agent_admin(action="cognition_list")`
+  - `agent_admin(action="cognition_show", payload={name})`
+  - `agent_admin(action="cognition_set", payload={agent_id, profile})`
+  - `agent_admin(action="affect_log_sensory", payload={agent_id, sensory_dimensions, ...})`
+    — writes an affect row carrying per-channel `sensory_dimensions` and
+    emits a `sensory_overload` event when
     `sensory_load > sensory_overload_threshold`.
+  - `entity_admin(action="interest_add", payload={entity, strength})`
+  - `entity_admin(action="interest_list", payload={scope?, limit?})`
 
 Both surfaces share the same Python implementations; the CLI is not
 "more privileged" than the MCP path. An autistic-profile agent that
-uses `cognition_set` via MCP and one that uses `brainctl cognition set`
+uses `agent_admin(action="cognition_set")` via MCP and one that uses `brainctl cognition set`
 end up in identical states.
 
 ## What this changes at runtime

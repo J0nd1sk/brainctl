@@ -356,3 +356,37 @@ class TestMigration086:
         db.commit()
         row = db.execute("SELECT cognitive_profile FROM agents WHERE id='x'").fetchone()
         assert row[0] == "neurotypical"
+
+
+# ---------------------------------------------------------------------------
+# v2 MCP surface: cognitive tools are hidden and routed via admin dispatchers
+# ---------------------------------------------------------------------------
+
+class TestV2DispatcherRouting:
+    _ROUTES = {
+        ("agent_admin", "cognition_list"): "cognition_list",
+        ("agent_admin", "cognition_show"): "cognition_show",
+        ("agent_admin", "cognition_set"): "cognition_set",
+        ("agent_admin", "affect_log_sensory"): "affect_log_sensory",
+        ("entity_admin", "interest_add"): "interest_add",
+        ("entity_admin", "interest_list"): "interest_list",
+    }
+
+    def test_tools_hidden_from_visible_surface(self):
+        from agentmemory import mcp_tools_consolidated as mtc
+        for target in self._ROUTES.values():
+            assert target in mtc.DEPRECATED_TOOL_NAMES
+
+    def test_admin_dispatchers_route_cognitive_actions(self):
+        from agentmemory import mcp_tools_consolidated as mtc
+        for (topic, action), target in self._ROUTES.items():
+            assert mtc._TOPIC_ROUTES[topic][action] == target
+
+    def test_dispatcher_calls_through_to_handler(self):
+        from agentmemory import mcp_tools_consolidated as mtc
+        out = mtc.tool_agent_admin(action="cognition_list")
+        assert "profiles" in out, out
+        shown = mtc.tool_agent_admin(action="cognition_show", payload={"name": "autistic"})
+        assert "profile" in shown, shown
+        bad = mtc.tool_agent_admin(action="cognition_show", payload={"name": "nope"})
+        assert "error" in bad
