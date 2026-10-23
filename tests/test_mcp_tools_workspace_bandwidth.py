@@ -115,11 +115,13 @@ def test_set_validates(tmp_path, monkeypatch):
 
 def test_rotation_creates_epoch_row(tmp_path, monkeypatch):
     mod = _make_db(tmp_path, monkeypatch)
-    # Set duration to 1s, admit twice, sleep 2s, status should rotate.
-    mod.tool_workspace_bandwidth_set(epoch_duration_seconds=1)
+    # Timestamps are second-resolution, so a 1s epoch can expire between
+    # the two admits. Use 2s (admits always land in the first epoch) and
+    # sleep past it so status must rotate exactly once.
+    mod.tool_workspace_bandwidth_set(epoch_duration_seconds=2)
     mod.tool_workspace_bandwidth_admit()
     mod.tool_workspace_bandwidth_admit()
-    time.sleep(1.2)
+    time.sleep(3.1)
     out = mod.tool_workspace_bandwidth_status()
     assert out["rotation"].get("rotated") is True
     assert out["rotation"]["admitted"] == 2
