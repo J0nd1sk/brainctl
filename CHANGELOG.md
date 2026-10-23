@@ -5,6 +5,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.8.1] — 2026-10-23 — *hotfix: MCP install crash + search index loss*
+
+### Fixed
+
+- **MCP server crashed on fresh install.** The `mcp` requirement had no
+  upper bound and now resolves to mcp 2.x, which removed the low-level
+  `Server` decorator API. Pinned `mcp>=1.27.0,<2.0.0` (PR #171).
+- **New memories vanished from keyword search.** Three compounding FTS5
+  bugs:
+  - `brainctl init` never seeded the external-content index (#151, PR #167,
+    migration 084; startup self-heal now also rebuilds when the index has
+    fewer rows than active memories).
+  - The `memories_fts` update triggers fired on every column, so metadata
+    writes (recall boosts on each search hit) eroded the index (#152,
+    PR #166, migration 083).
+  - The scoped trigger pair fired insert-then-delete (SQLite runs
+    same-event triggers newest-first), so category-only and same-text
+    updates still dropped the row. Migration 085 recreates the pair in the
+    right order; the MCP startup self-heal detects and repairs mis-ordered
+    triggers.
+- `brainctl vec reindex` ImportError on `sample_db_embedding_widths` (#160).
+- `vsearch` aborted when `vec_events` / `vec_context` don't exist (#161).
+- `dream-cycle` NREM crash comparing naive and aware datetimes (#168).
+- `brainctl-mcp` without the `[mcp]` extra printed a raw
+  `ModuleNotFoundError`; it now prints the install command (#159, PR #170).
+
+### Included from main since 2.8.0
+
+- `brainctl-mcp` auto-migrates `brain.db` on startup.
+- PyInstaller spec + release workflow for a standalone macOS arm64
+  `brainctl-mcp` bundle.
+- `brainctl-mcp-http` defaults to the visible v2 tool surface.
+- `--list-tools` honours `BRAINCTL_ALLOWED_TOOLS`.
+
 ## [2.8.0] — 2026-05-20 — *16 brain subsystems + v2 MCP tool surface (PR #138)*
 
 This release lands the issue #116 brain-architecture work and consolidates
