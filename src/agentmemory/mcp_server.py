@@ -2346,11 +2346,8 @@ def tool_belief_collapse(
     limit: int = 20,
 ) -> dict:
     """Belief Collapse Mechanics: measurement operators + collapse event logging."""
-    import sys
-    from pathlib import Path as _Path
-    sys.path.insert(0, str(_Path.home() / "agentmemory"))
     try:
-        from collapse_mechanics import (
+        from agentmemory.collapse_mechanics import (
             force_collapse, list_collapse_events, collapse_stats,
             evaluate_coherence, is_superposed, check_and_collapse_on_time,
         )
