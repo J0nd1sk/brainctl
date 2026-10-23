@@ -324,7 +324,7 @@ def register_parser(sub: Any) -> None:
             "Cognitive profiles retune brainctl's W(m) gate, AGM "
             "conflict-resolution threshold, Bayesian recall priors, and "
             "retrieval rerank without forking the codepaths. The "
-            "neurotypical profile (default) preserves all pre-052 "
+            "neurotypical profile (default) preserves all pre-086 "
             "behavior. The autistic profile applies HIPPEA-grounded "
             "retuning — see docs/AUTISTIC_BRAIN.md."
         ),

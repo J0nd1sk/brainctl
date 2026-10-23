@@ -1,4 +1,4 @@
--- 052_cognitive_profile.sql
+-- 086_cognitive_profile.sql
 --
 -- Cognitive profile feature (autistic-brain features). Adds a per-agent
 -- `cognitive_profile` selector and the schema surfaces needed to support
@@ -70,6 +70,6 @@ CREATE INDEX IF NOT EXISTS idx_affect_sensory_load
     WHERE sensory_load IS NOT NULL;
 
 INSERT OR IGNORE INTO schema_version (version, description, applied_at)
-VALUES (52,
+VALUES (86,
         'cognitive_profile: agents.cognitive_profile + entity contradiction variants + special-interest tagging + affect_log sensory dimensions (autistic-brain features)',
         strftime('%Y-%m-%dT%H:%M:%S', 'now'));

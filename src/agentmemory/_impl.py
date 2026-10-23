@@ -62,26 +62,26 @@ def _builtin_classify_intent(query):
     if any(w in q for w in ['who ', 'person', 'agent', 'team', 'assigned']):
         return _BuiltinIntentResult('entity_lookup', 0.8, 'keyword:entity',
                                      'Show entity details with relations',
-                                     ['memories', 'events', 'context'])
+                                     ['memories', 'procedures', 'events', 'context'])
     if any(w in q for w in ['what happened', 'when did', 'history', 'timeline', 'log']):
         return _BuiltinIntentResult('event_lookup', 0.8, 'keyword:event',
                                      'Show events in chronological order',
-                                     ['events', 'memories', 'context'])
-    if any(w in q for w in ['how to', 'how do', 'procedure', 'steps', 'guide']):
+                                     ['events', 'memories', 'context', 'procedures'])
+    if any(w in q for w in ['how to', 'how do', 'procedure', 'steps', 'guide', 'rollback', 'runbook', 'playbook', 'troubleshoot']):
         return _BuiltinIntentResult('procedural', 0.7, 'keyword:procedural',
                                      'Show step-by-step instructions',
-                                     ['memories', 'context', 'events'])
+                                     ['procedures', 'memories', 'decisions', 'events', 'context'])
     if any(w in q for w in ['why ', 'decision', 'rationale', 'reason']):
         return _BuiltinIntentResult('decision_lookup', 0.8, 'keyword:decision',
                                      'Show decisions with rationale',
-                                     ['memories', 'events', 'context'])
+                                     ['decisions', 'memories', 'procedures', 'events', 'context'])
     if any(w in q for w in ['related', 'connected', 'depends', 'link']):
         return _BuiltinIntentResult('graph_traversal', 0.7, 'keyword:graph',
                                      'Show connected nodes and edges',
-                                     ['memories', 'events', 'context'])
+                                     ['memories', 'events', 'context', 'procedures'])
     return _BuiltinIntentResult('general', 0.5, 'default',
                                  'Standard search results',
-                                 ['memories', 'events', 'context'])
+                                 ['memories', 'procedures', 'events', 'context'])
 
 # Quantum amplitude scorer
 try:
@@ -157,21 +157,18 @@ _CE_LATENCY_SAMPLES_MS = deque(maxlen=max(8, _CE_LATENCY_WINDOW))
 # via `_CE_WARMUP_SEEN[0] = 0`.
 _CE_WARMUP_SEEN = [0]
 
-# FTS5 special characters that cause sqlite3.OperationalError when unescaped.
-# Strip them before passing any user query to a MATCH clause.
-#
-# Includes `?` and `!` — natural-language queries from agents and humans
-# contain these constantly ("What does X prefer?") and used to crash
-# cmd_search with "fts5: syntax error near ?". Also includes common ASCII
-# punctuation (`,;:`) that has no operator meaning in FTS5 but still breaks
-# tokenisation when glued to a word.
-_FTS5_SPECIAL = re.compile(r'[.&|*"\'`()\-@^?!,;:]')
+# FTS5 MATCH is brittle around punctuation and symbolic tokens. Strip any
+# non-word, non-space character, plus `_`, before building the MATCH
+# expression. This covers common natural-language queries like "$5 coupon",
+# "LGBTQ+", "7/22", "#PlankChallenge", "SIAC_GEE", and smart quotes.
+_FTS5_SPECIAL = re.compile(r"[^\w\s]|_")
 
 
 def _sanitize_fts_query(query: str) -> str:
     """Remove FTS5 special characters to prevent syntax errors.
 
-    Strips: . & | * \" ' ` ( ) - @ ^ ? ! , ; :
+    Strips punctuation and symbolic tokens, plus `_`, before collapsing
+    whitespace.
     Then collapses extra whitespace.  Returns an empty string if nothing
     remains so callers can skip the MATCH clause gracefully.
     """
@@ -186,7 +183,22 @@ _FTS_STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "do", "does", "for",
     "from", "has", "have", "how", "i", "in", "is", "it", "its", "of",
     "on", "or", "that", "the", "to", "was", "we", "what", "when", "where",
-    "which", "who", "why", "will", "with", "you",
+    "which", "who", "why", "will", "with", "you", "use", "uses", "used", "using",
+}
+
+_FTS_QUERY_EXPANSIONS = {
+    "choose": ("chose", "chosen"),
+    "chose": ("choose", "chosen"),
+    "chosen": ("choose", "chose"),
+    "store": ("stores", "stored"),
+    "stores": ("store", "stored"),
+    "stored": ("store", "stores"),
+    "prefer": ("prefers", "preferred"),
+    "prefers": ("prefer",),
+    "embedding": ("embeddings", "embed"),
+    "embeddings": ("embedding", "embed"),
+    "use": ("uses", "using", "used"),
+    "uses": ("use", "using"),
 }
 
 
@@ -208,7 +220,17 @@ def _build_fts_match_expression(sanitized: str) -> str:
     meaningful = [t for t in tokens if t.lower() not in _FTS_STOPWORDS and len(t) > 1]
     if not meaningful:
         meaningful = tokens
-    return " OR ".join(meaningful)
+    expanded: list[str] = []
+    seen: set[str] = set()
+    for token in meaningful:
+        variants = (token, *_FTS_QUERY_EXPANSIONS.get(token.lower(), ()))
+        for variant in variants:
+            key = variant.lower()
+            if key in _FTS_STOPWORDS or key in seen:
+                continue
+            seen.add(key)
+            expanded.append(variant)
+    return " OR ".join(expanded or meaningful)
 
 # Temporal recency decay constants (lambda) — configurable per scope
 # half-life: global ~70d, project ~23d, agent ~14d
@@ -3189,6 +3211,31 @@ def cmd_memory_add(args):
     memory_id = cursor.lastrowid
     db.commit()  # ensure the INSERT (and FTS trigger) is committed before subprocess exit
 
+    procedure_id = None
+    if memory_type == "procedural":
+        try:
+            from agentmemory import procedural as _procedural
+
+            proc = _procedural.ensure_procedure_for_memory(
+                db,
+                memory_id=memory_id,
+                agent_id=args.agent,
+            )
+            procedure_id = proc.get("id")
+            db.commit()
+        except Exception as exc:
+            logger.debug("procedural bridge creation failed for memory %s: %s", memory_id, exc)
+
+    indexed_row = db.execute(
+        "SELECT content, category, tags FROM memories WHERE id = ?",
+        (memory_id,),
+    ).fetchone()
+    indexed_content = indexed_row["content"] if indexed_row else args.content
+    indexed_category = indexed_row["category"] if indexed_row else args.category
+    indexed_tags = indexed_row["tags"] if indexed_row else (tags_json or "")
+    if indexed_content != args.content:
+        blob = None
+
     # Workaround: FTS5 content-external tables may not build the inverted index
     # from trigger INSERTs on some SQLite versions. Force a re-index for this memory.
     if do_index:
@@ -3196,11 +3243,11 @@ def cmd_memory_add(args):
             db.execute(
                 "INSERT INTO memories_fts(memories_fts, rowid, content, category, tags) "
                 "VALUES('delete', ?, ?, ?, ?)",
-                (memory_id, args.content, args.category, tags_json or ''))
+                (memory_id, indexed_content, indexed_category, indexed_tags or ''))
             db.execute(
                 "INSERT INTO memories_fts(rowid, content, category, tags) "
                 "VALUES (?, ?, ?, ?)",
-                (memory_id, args.content, args.category, tags_json or ''))
+                (memory_id, indexed_content, indexed_category, indexed_tags or ''))
             db.commit()
         except Exception:
             pass  # non-fatal: FTS trigger may have already handled it
@@ -3323,7 +3370,7 @@ def cmd_memory_add(args):
     if do_index:
         try:
             if not blob:
-                blob = _embed_query_safe(args.content)
+                blob = _embed_query_safe(indexed_content)
             if blob:
                 db_vec = _try_get_db_with_vec()
                 if db_vec:
@@ -3352,6 +3399,8 @@ def cmd_memory_add(args):
         "conflict_logged": conflict_logged,
         "worthiness_score": worthiness_score,
     }
+    if procedure_id is not None:
+        out["procedure_id"] = procedure_id
     if auto_linked:
         out["auto_linked_entities"] = auto_linked
     if pii_info:
@@ -6168,6 +6217,11 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
     """
     if db is None:
         db = get_db()
+    # Issue #116 Phase 1-A: pathway-log emission needs a wall-clock anchor at
+    # function entry so latency_ms can be measured at the exit site. time.monotonic()
+    # is the right clock here — wall-clock skews under NTP adjustments.
+    import time as _time
+    _rpl_start_ns = _time.monotonic_ns()
     query = args.query
     limit = args.limit or 10
     no_recency = getattr(args, "no_recency", False)
@@ -6191,7 +6245,7 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
             "[brainctl] --benchmark: reranker chain disabled, returning raw FTS+vec ranking",
             file=sys.stderr,
         )
-    results = {"memories": [], "events": [], "context": [], "decisions": []}
+    results = {"memories": [], "events": [], "context": [], "decisions": [], "procedures": []}
     # Accumulator for which signal-informativeness gates tripped this call.
     # Each value is a string reason like "uniform_timestamps_stdev_3.2s" or a
     # boolean True for benchmark-mode hard skips. Surfaced under the top-level
@@ -6235,7 +6289,7 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
         os.environ.get("BRAINCTL_DISABLE_INTENT_ROUTER")
     )
     if args.tables:
-        tables = args.tables.split(",")
+        tables = [t.strip() for t in args.tables.split(",") if t.strip()]
     elif _intent_router_disabled:
         tables = ["memories", "events", "context", "entities", "decisions"]
     elif _INTENT_AVAILABLE:
@@ -6259,6 +6313,55 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
         and "decisions" not in tables
     ):
         tables = list(set(tables) | {"memories", "events", "context", "decisions"})
+
+    # Issue #116 Phase 1-B: motivational entry gate. Compute the suppression
+    # list from the active profile + classified intent. In shadow mode
+    # (default) the list is only logged into the pathway log. In enforce
+    # mode (BRAINCTL_MOTIVATIONAL_GATE_ENFORCE=1) it removes the suppressed
+    # tables from `tables` and zeros out temporal expansion.
+    _mg_suppressed: list[str] = []
+    try:
+        from agentmemory.motivational_gate import (
+            compute_suppressions as _mg_compute,
+            apply_suppressions as _mg_apply,
+            is_enforce_enabled as _mg_enforce_on,
+        )
+        _mg_intent = (
+            _intent_result.intent if _intent_result is not None else None
+        )
+        _mg_profile = getattr(args, "profile", None)
+        _mg_suppressed = _mg_compute(
+            profile=_mg_profile, intent_label=_mg_intent
+        )
+        if _mg_suppressed and _mg_enforce_on():
+            _temporal_in = getattr(args, "temporal_expand_hours", None)
+            tables, _temporal_out = _mg_apply(
+                _mg_suppressed,
+                tables=tables,
+                temporal_expand_hours=_temporal_in,
+            )
+            if _temporal_out != _temporal_in:
+                # Only override when the gate actually adjusts the value;
+                # otherwise leave the caller's setting untouched.
+                try:
+                    setattr(args, "temporal_expand_hours", _temporal_out)
+                except Exception:
+                    pass
+    except Exception:  # pragma: no cover — defensive
+        # Gate must never break search. Empty suppression on any failure.
+        _mg_suppressed = []
+
+    _query_plan = None
+    _query_plan_dict = None
+    try:
+        from agentmemory.retrieval.query_planner import plan_query as _plan_query
+
+        _query_plan = _plan_query(query, requested_tables=tables if args.tables else None)
+        _query_plan_dict = _query_plan.as_dict()
+        if not args.tables:
+            tables = list(dict.fromkeys((_query_plan.candidate_tables or []) + list(tables)))
+    except Exception as exc:
+        _debug_skips["query_plan.skipped"] = f"{type(exc).__name__}: {exc}"
     base_fetch = limit * 5 if not no_recency else limit * 3
     fetch_limit = max(limit, round(base_fetch * _nm_breadth))
     # Build an OR-expanded FTS5 MATCH expression so natural-language queries
@@ -6326,6 +6429,7 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
             "m.trust_score, m.replay_priority "
             "FROM memories m JOIN memories_fts f ON m.id = f.rowid "
             "WHERE memories_fts MATCH ? AND m.retired_at IS NULL "
+            "AND COALESCE(m.memory_type, 'episodic') != 'procedural' "
             "ORDER BY bm25(memories_fts, 3.0, 1.0, 1.0) LIMIT ?",
             (fts_query, fetch_limit)
         ).fetchall()
@@ -6351,7 +6455,8 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
             f"created_at, recalled_count, temporal_class, last_recalled_at, retrieval_prediction_error, alpha, beta, agent_id, "
             f"encoding_task_context, encoding_context_hash, q_value, confidence_phase, "
             f"trust_score, replay_priority "
-            f"FROM memories WHERE id IN ({ph}) AND retired_at IS NULL",
+            f"FROM memories WHERE id IN ({ph}) AND retired_at IS NULL "
+            f"AND COALESCE(memory_type, 'episodic') != 'procedural'",
             rowids
         ).fetchall()
         out = [dict(r) | {"distance": round(dist_map.get(r["id"], 1.0), 4)} for r in src_rows]
@@ -6824,7 +6929,9 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
             explore_rows = db.execute(
                 "SELECT id, 'memory' as type, category, content, confidence, scope, "
                 "created_at, recalled_count, temporal_class, last_recalled_at "
-                "FROM memories WHERE retired_at IS NULL ORDER BY recalled_count ASC, RANDOM() LIMIT ?",
+                "FROM memories WHERE retired_at IS NULL "
+                "AND COALESCE(memory_type, 'episodic') != 'procedural' "
+                "ORDER BY recalled_count ASC, RANDOM() LIMIT ?",
                 (limit * 10,)
             ).fetchall()
             explore_list = rows_to_list(explore_rows)
@@ -6994,6 +7101,73 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
             trimmed.extend(graph)
         results["context"] = trimmed
 
+    _procedure_debug = None
+    _pre_answerability_candidates = []
+    if "procedures" in tables:
+        try:
+            proc_scope = None
+            if getattr(args, "project", None):
+                proc_scope = f"project:{args.project}"
+            try:
+                from agentmemory.retrieval.candidate_generation import generate_procedure_candidates as _generate_procedure_candidates
+                from agentmemory.retrieval.evidence_graph import expand_procedure_evidence as _expand_procedure_evidence
+                from agentmemory.retrieval.late_reranker import rerank_procedure_candidates as _rerank_procedure_candidates
+                from agentmemory.retrieval.query_planner import plan_query as _plan_query
+            except ImportError:
+                from agentmemory import procedural as _procedural
+
+                direct = _procedural.search_procedures(
+                    db,
+                    query,
+                    limit=limit,
+                    scope=proc_scope,
+                    debug=True,
+                )
+                rows = direct.get("procedures", []) or []
+                for row in rows:
+                    row.setdefault("source", "procedure_fts")
+                    row.setdefault("type", "procedure")
+                results["procedures"] = rows[:limit]
+                generated = {"debug": {"fallback": "procedural_service", **(direct.get("debug") or {})}}
+                evidence = {}
+            else:
+                if _query_plan is None:
+                    _query_plan = _plan_query(query, requested_tables=tables)
+                    _query_plan_dict = _query_plan.as_dict()
+                generated = _generate_procedure_candidates(
+                    db,
+                    query,
+                    _query_plan,
+                    limit=fetch_limit,
+                    scope=proc_scope,
+                )
+                evidence = _expand_procedure_evidence(
+                    db,
+                    generated.get("candidates", []),
+                    max_sources_per_candidate=4,
+                )
+                reranked = _rerank_procedure_candidates(
+                    generated.get("candidates", []),
+                    evidence,
+                    benchmark_mode=benchmark_mode,
+                )
+                results["procedures"] = reranked[:limit]
+            _pre_answerability_candidates = list(results["procedures"])
+            _procedure_debug = {
+                "candidate_generation": generated.get("debug") or {},
+                "evidence_clusters": {
+                    str(proc_id): {
+                        "support_bonus": info.get("support_bonus"),
+                        "source_count": len(info.get("sources") or []),
+                        "edge_count": len(info.get("edges") or []),
+                    }
+                    for proc_id, info in evidence.items()
+                },
+            }
+        except Exception as exc:
+            results["procedures"] = []
+            _debug_skips["procedures.skipped"] = f"{type(exc).__name__}: {exc}"
+
     # Intent-based result weighting and decision search.
     #
     # cmd_search accepts two intent taxonomies:
@@ -7062,6 +7236,14 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
                 r["final_score"] = round(r.get("final_score", 0.0) * 2.0, 8)
             results["events"] = sorted(results.get("events", []),
                                         key=lambda r: r.get("final_score", 0), reverse=True)
+        elif _intent == "procedural":
+            for r in results.get("procedures", []):
+                r["final_score"] = round(r.get("final_score", 0.0) * 1.2, 8)
+            results["procedures"] = sorted(
+                results.get("procedures", []),
+                key=lambda r: r.get("final_score", 0.0),
+                reverse=True,
+            )
         # decision_lookup → also search decisions table
         elif _intent == "decision_lookup":
             if fts_query:
@@ -7096,6 +7278,65 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
                     extra = _graph_expand(db, top_items, tbl_key, already)
                     results.get(tbl_key, []).extend(extra)
 
+    def _seed_bucket_score(item, position):
+        try:
+            final_score = float(item.get("final_score") or 0.0)
+        except (TypeError, ValueError):
+            final_score = 0.0
+        if final_score > 0:
+            return final_score
+        try:
+            rrf_score = float(item.get("rrf_score") or 0.0)
+        except (TypeError, ValueError):
+            rrf_score = 0.0
+        if rrf_score > 0:
+            return rrf_score
+        try:
+            fts_rank = float(item.get("fts_rank") or 0.0)
+        except (TypeError, ValueError):
+            fts_rank = 0.0
+        if fts_rank != 0.0:
+            return max(-fts_rank, 0.0)
+        try:
+            confidence = float(item.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if confidence > 0:
+            return confidence
+        return max(1.0 / (position + 1), 0.01)
+
+    def _normalize_bucket_scores(bucket_name):
+        rows = results.get(bucket_name, []) or []
+        if not rows:
+            return
+        seeds = [_seed_bucket_score(row, idx) for idx, row in enumerate(rows)]
+        max_seed = max(seeds) or 1.0
+        for row, seed in zip(rows, seeds):
+            row["retrieval_score"] = round(seed, 8)
+            row["final_score"] = round(seed / max_seed, 8)
+        rows.sort(key=lambda r: r.get("final_score", 0.0), reverse=True)
+        results[bucket_name] = rows
+
+    for _bucket_name in ("procedures", "memories", "events", "context", "entities", "decisions"):
+        _normalize_bucket_scores(_bucket_name)
+
+    _intent_bucket_multipliers = {
+        "procedural": {"procedures": 1.15, "memories": 0.95, "events": 0.85, "decisions": 0.8, "context": 0.75},
+        "troubleshooting": {"procedures": 1.05, "events": 1.0, "memories": 0.95, "decisions": 0.85, "context": 0.75},
+        "decision": {"decisions": 1.15, "memories": 1.05, "procedures": 0.65, "events": 0.85, "context": 0.75},
+        "temporal": {"events": 1.15, "memories": 0.9, "procedures": 0.55, "decisions": 0.8, "context": 0.75},
+        "factual": {"memories": 1.1, "entities": 1.05, "decisions": 0.95, "procedures": 0.55, "events": 0.8, "context": 0.75},
+        "orientation": {"memories": 1.0, "events": 0.95, "procedures": 0.75, "context": 0.8, "decisions": 0.8},
+        "graph": {"memories": 1.0, "events": 0.95, "decisions": 0.95, "procedures": 0.8, "context": 0.8},
+    }
+    _normalized_intent = (_query_plan.normalized_intent if _query_plan else "factual")
+    for _bucket_name, _multiplier in _intent_bucket_multipliers.get(_normalized_intent, {}).items():
+        _rows = results.get(_bucket_name, []) or []
+        for _row in _rows:
+            _row["final_score"] = round(float(_row.get("final_score") or 0.0) * _multiplier, 8)
+        _rows.sort(key=lambda r: r.get("final_score", 0.0), reverse=True)
+        results[_bucket_name] = _rows
+
     if db_vec:
         db_vec.close()
 
@@ -7110,13 +7351,38 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
     # --budget: trim results from lowest-ranked first until output fits within token cap
     if budget_tokens is not None:
         # Estimate current size; trim tail entries until we fit
-        for key in ("memories", "events", "context", "decisions"):
+        for key in ("memories", "events", "context", "decisions", "procedures"):
             lst = results.get(key, [])
             if not lst:
                 continue
             while lst and _estimate_tokens(results) > budget_tokens:
                 lst.pop()  # remove lowest-ranked (already sorted desc)
             results[key] = lst
+
+    _top_candidates = sorted(
+        [
+            item
+            for bucket in ("procedures", "memories", "events", "context", "decisions")
+            for item in (results.get(bucket, []) or [])
+        ],
+        key=lambda item: item.get("final_score", 0.0),
+        reverse=True,
+    )
+    _answerability = None
+    if _query_plan is not None:
+        try:
+            from agentmemory.retrieval.answerability import assess_answerability as _assess_answerability
+
+            _answerability = _assess_answerability(
+                query,
+                _query_plan,
+                {k: results.get(k, []) for k in ("procedures", "memories", "events", "context", "decisions")},
+            )
+            if _answerability.get("abstain") and _query_plan.abstain_allowed:
+                for key in ("memories", "events", "context", "decisions", "procedures"):
+                    results[key] = []
+        except Exception as exc:
+            _debug_skips["answerability.skipped"] = f"{type(exc).__name__}: {exc}"
 
     total = sum(len(v) for v in results.values())
     tokens_out = _estimate_tokens(results)
@@ -7125,37 +7391,41 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
     # Update recalled_count for direct (non-graph) memory hits only.
     # Uses retrieval-practice strengthening: hard retrievals (high prediction error)
     # boost confidence more than easy ones (Roediger & Karpicke 2006, Bjork 1994).
-    for r in results.get("memories", []):
-        if r.get("source") != "graph":
-            _retrieval_practice_boost(
-                db,
-                r["id"],
-                retrieval_prediction_error=r.get("retrieval_prediction_error") or 0.0,
-            )
+    #
+    # Benchmark mode deliberately skips these online-learning writes so the
+    # retrieval corpus stays stable across repeated synthetic queries.
+    if not benchmark_mode:
+        for r in results.get("memories", []):
+            if r.get("source") != "graph":
+                _retrieval_practice_boost(
+                    db,
+                    r["id"],
+                    retrieval_prediction_error=r.get("retrieval_prediction_error") or 0.0,
+                )
 
-    # Online phase learning: nudge confidence_phase toward constructive (0) after recall
-    # Uses existing db connection to avoid lock contention with uncommitted recall_count updates.
-    try:
-        _has_phase_col = any(
-            col[1] == "confidence_phase"
-            for col in db.execute("PRAGMA table_info(memories)").fetchall()
-        )
-        if _has_phase_col:
-            _delta = 0.05
-            for r in results.get("memories", []):
-                if r.get("source") != "graph":
-                    _pm_id = r["id"]
-                    _pm_row = db.execute(
-                        "SELECT confidence_phase FROM memories WHERE id=? AND retired_at IS NULL",
-                        (_pm_id,)
-                    ).fetchone()
-                    if _pm_row and _pm_row[0] is not None:
-                        import math as _pmath
-                        _ph = float(_pm_row[0])
-                        _ph = (_ph + _delta if _ph > _pmath.pi else max(0.0, _ph - _delta)) % (2 * _pmath.pi)
-                        db.execute("UPDATE memories SET confidence_phase=? WHERE id=?", (_ph, _pm_id))
-    except Exception:
-        pass  # phase learning is optional; never break search
+        # Online phase learning: nudge confidence_phase toward constructive (0) after recall
+        # Uses existing db connection to avoid lock contention with uncommitted recall_count updates.
+        try:
+            _has_phase_col = any(
+                col[1] == "confidence_phase"
+                for col in db.execute("PRAGMA table_info(memories)").fetchall()
+            )
+            if _has_phase_col:
+                _delta = 0.05
+                for r in results.get("memories", []):
+                    if r.get("source") != "graph":
+                        _pm_id = r["id"]
+                        _pm_row = db.execute(
+                            "SELECT confidence_phase FROM memories WHERE id=? AND retired_at IS NULL",
+                            (_pm_id,)
+                        ).fetchone()
+                        if _pm_row and _pm_row[0] is not None:
+                            import math as _pmath
+                            _ph = float(_pm_row[0])
+                            _ph = (_ph + _delta if _ph > _pmath.pi else max(0.0, _ph - _delta)) % (2 * _pmath.pi)
+                            db.execute("UPDATE memories SET confidence_phase=? WHERE id=?", (_ph, _pm_id))
+        except Exception:
+            pass  # phase learning is optional; never break search
 
     # Post-retrieval metacognitive tier annotation
     # Tier 1: high-confidence fresh results  (≥3 direct results, avg_conf ≥ 0.7)
@@ -7164,14 +7434,19 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
     # Tier 4: coverage gap                   (0 direct results)
     # Exclude graph-expanded neighbours (source="graph") — they don't reflect query coverage
     memory_results = [r for r in results.get("memories", []) if r.get("source") != "graph"]
+    procedure_results = [r for r in results.get("procedures", []) if r.get("source") != "graph"]
+    direct_results = memory_results + procedure_results
     # Keyword/both hits: FTS5 textual matches — strongest evidence of genuine coverage
-    keyword_hits = [r for r in memory_results if r.get("source") in ("keyword", "both")]
+    keyword_hits = [
+        r for r in direct_results
+        if r.get("source") in ("keyword", "both", "procedure_fts")
+    ]
     k_count = len(keyword_hits)
 
-    if not memory_results:
+    if not direct_results:
         tier = 4
         tier_label = "gap-detected"
-        tier_note = "COVERAGE GAP — no memories match this query"
+        tier_note = "COVERAGE GAP — no grounded memories or procedures match this query"
         try:
             _log_gap(db, "coverage_hole", f"query:{_sanitize_fts_query(query)[:80]}", 1.0, triggered_by=query[:200])
         except Exception:
@@ -7199,19 +7474,19 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
     elif k_count > 0:
         tier = 2
         tier_label = "moderate"
-        tier_note = f"Only {k_count} keyword match(es); {len(memory_results)} total (includes semantic)"
+        tier_note = f"Only {k_count} direct lexical match(es); {len(direct_results)} total direct result(s)"
     else:
         tier = 3
         tier_label = "weak-coverage"
-        tier_note = f"No keyword matches; {len(memory_results)} semantic-only result(s) — potential gap"
+        tier_note = f"No lexical direct matches; {len(direct_results)} semantic/procedural result(s) — potential gap"
 
     # Passive search instrumentation — append row to agent_uncertainty_log
     try:
         _unc_agent = getattr(args, "agent", None) or "unknown"
         _unc_domain = getattr(args, "scope", None) or (tables[0] if tables else "memories")
         _unc_avg_conf = None
-        if memory_results:
-            _conf_vals = [r.get("confidence") for r in memory_results if r.get("confidence") is not None]
+        if direct_results:
+            _conf_vals = [r.get("confidence") for r in direct_results if r.get("confidence") is not None]
             if _conf_vals:
                 _unc_avg_conf = round(sum(_conf_vals) / len(_conf_vals), 4)
         db.execute(
@@ -7259,12 +7534,29 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
     except Exception:
         pass  # trigger check is optional; never break search
 
+    _debug_payload = {}
+    try:
+        if _query_plan_dict is not None or _procedure_debug is not None or _answerability is not None:
+            from agentmemory.retrieval.diagnostics import build_debug_payload as _build_debug_payload
+
+            _debug_payload = _build_debug_payload(
+                query_plan=_query_plan_dict or {},
+                procedure_debug=_procedure_debug,
+                answerability=_answerability,
+                top_candidates=_top_candidates,
+            )
+    except Exception as exc:
+        _debug_skips["diagnostics.skipped"] = f"{type(exc).__name__}: {exc}"
+
     _out = {
         "mode": mode,
         "metacognition": {
             "tier": tier,
             "label": tier_label,
             "note": tier_note,
+            "answerability_score": (_answerability or {}).get("score"),
+            "answerability_reason": (_answerability or {}).get("reason"),
+            "abstained": (_answerability or {}).get("abstain", False),
             **_intent_meta,
             **_rollout_meta,
         },
@@ -7282,10 +7574,64 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
     # "all_signals_informative" marker so downstream tooling can rely on
     # the key always being present in debug mode. Without `--debug` and
     # no skips, stay silent to keep the default response compact.
-    if _debug_skips:
-        _out["_debug"] = dict(_debug_skips)
+    if _debug_skips or _debug_payload:
+        _debug_out = dict(_debug_skips)
+        _debug_out.update(_debug_payload)
+        _out["_debug"] = _debug_out
     elif _debug_mode:
         _out["_debug"] = {"all_signals_informative": True}
+
+    # Issue #116 Phase 1-A: emit one row to retrieval_pathway_log capturing the
+    # pathway fingerprint of this retrieval. Best-effort; never blocks the
+    # return path. Gated behind BRAINCTL_PATHWAY_LOG env var. See
+    # research/issue-116-audit-vs-origin-main.md for the design rationale.
+    #
+    # Why we commit `db` first: get_db() returns isolation_level="" which
+    # auto-BEGINs on any DML. cmd_search has typically written to access_log
+    # / salience / recency tracking by this point, so the shared connection
+    # is mid-transaction and holds a writer lock. emit_pathway_log opens a
+    # separate autocommit connection (deliberately, to keep the helper
+    # decoupled from the caller's transaction state); without committing
+    # `db` first, that second connection collides on the writer lock
+    # even in WAL mode and fails with "database is locked". Committing
+    # here is benign for cmd_search — by this site all retrieval logic is
+    # complete and the remainder of the function only formats output.
+    try:
+        if db.in_transaction:
+            db.commit()
+    except Exception:
+        pass
+    try:
+        from agentmemory.retrieval_pathway_log import (
+            emit_pathway_log as _rpl_emit,
+            table_distribution_from_results as _rpl_table_dist,
+        )
+        _rpl_latency_ms = max(0, int((_time.monotonic_ns() - _rpl_start_ns) // 1_000_000))
+        _rpl_intent_label = (
+            _intent_result.intent if _intent_result is not None else None
+        )
+        _rpl_emit(
+            agent_id=getattr(args, "agent", None) or _rollout_agent,
+            project=getattr(args, "project", None) or getattr(args, "scope", None),
+            query=query,
+            mode=mode,
+            table_distribution=_rpl_table_dist(results),
+            tables_searched=tables,
+            candidate_count_post=sum(
+                len(v) for v in results.values() if isinstance(v, list)
+            ),
+            intent_label=_rpl_intent_label,
+            active_profile=getattr(args, "profile", None),
+            suppressed_strategies=_mg_suppressed or None,
+            embedding_model_version=f"{EMBED_MODEL}:{EMBED_DIMENSIONS}",
+            latency_ms=_rpl_latency_ms,
+            benchmark_mode=benchmark_mode,
+            db_path=db_path,
+        )
+    except Exception:  # pragma: no cover — defensive
+        # Import errors or any other unexpected issue must not break search.
+        pass
+
     _ofmt = getattr(args, "output", "json")
     if _ofmt == "return":
         return _out
@@ -7772,10 +8118,18 @@ def cmd_vsearch(args):
 
     def _vsearch_table(vec_table, src_table, text_col, extra_cols, fts_table):
         fetch_n = limit * 3
-        vec_rows = db.execute(
-            f"SELECT rowid, distance FROM {vec_table} WHERE embedding MATCH ? AND k=?",
-            (q_blob, fetch_n),
-        ).fetchall()
+        try:
+            vec_rows = db.execute(
+                f"SELECT rowid, distance FROM {vec_table} WHERE embedding MATCH ? AND k=?",
+                (q_blob, fetch_n),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # The vec table for this source doesn't exist (issue #161). Only
+            # vec_memories is created/populated today; vec_events / vec_context
+            # are in the default table set but never built. Skip the missing
+            # source and let vsearch still return results from the tables that
+            # do exist, instead of aborting the whole command.
+            return []
         if not vec_rows:
             return []
 
@@ -9349,7 +9703,7 @@ def cmd_init(args):
     ]
     for loc in schema_locations:
         if loc.exists():
-            schema_sql = loc.read_text()
+            schema_sql = loc.read_text(encoding="utf-8")
             break
 
     try:
@@ -9379,13 +9733,47 @@ def cmd_init(args):
         except Exception:
             pass  # Some tables may not exist in minimal schema
 
+        conn.close()
+
+        # Bring fresh DB up to HEAD by applying every pending numbered
+        # migration. init_schema.sql is a snapshot — it lags newest
+        # migrations by design (regenerating 2800+ lines on every
+        # migration release is a maintainer foot-gun). Migrations are
+        # idempotent (CREATE TABLE IF NOT EXISTS + the tolerant
+        # _apply_sql), so applying them here is safe whether or not the
+        # init_schema snapshot already contained their tables.
+        migrate_summary: dict | None = None
+        try:
+            from agentmemory import migrate as _mig
+            migrate_summary = _mig.run(str(target), dry_run=False, backup=False)
+        except Exception as exc:
+            # Migration failure on a fresh init should surface but not
+            # erase the DB. Doctor will catch downstream issues.
+            migrate_summary = {"ok": False, "error": str(exc)}
+
+        conn = sqlite3.connect(str(target))
         conn.row_factory = sqlite3.Row
         tables = [r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
         ).fetchall()]
+        # Seed the external-content FTS5 inverted index (issue #151). A fresh
+        # memories_fts starts empty; without this rebuild the index is never
+        # primed, and subsequent adds + searches on the CLI path return
+        # nothing until a manual rebuild.
+        try:
+            conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
+            conn.commit()
+        except sqlite3.Error:
+            pass  # memories_fts may be absent in a minimal/partial schema
         conn.close()
 
-        json_out({"ok": True, "path": str(target), "tables": len(tables), "table_list": tables})
+        json_out({
+            "ok": True,
+            "path": str(target),
+            "tables": len(tables),
+            "table_list": tables,
+            "migrations": migrate_summary,
+        })
         # Welcome message for interactive use
         if sys.stdout.isatty():
             print(f"\n  brain.db created at {target} ({len(tables)} tables)")
@@ -12445,7 +12833,7 @@ def cmd_collapse_stats(args):
 def cmd_resolve_conflict(args):
     """AGM credibility-weighted resolution of open belief conflicts."""
     # Prefer the in-package implementation (which is profile-aware as of
-    # migration 052); fall back to the legacy ~/bin/lib override for
+    # migration 086); fall back to the legacy ~/bin/lib override for
     # back-compat with users who maintain a customized belief_revision.py
     # there.
     try:
@@ -16169,8 +16557,8 @@ def build_parser():
     mem_add.add_argument("--confidence", type=float)
     mem_add.add_argument("--tags", "-t", help="Comma-separated tags")
     mem_add.add_argument("--source-event", type=int)
-    mem_add.add_argument("--type", choices=["episodic", "semantic"], default="episodic",
-                         help="Memory type: episodic (time-bound, faster decay) or semantic (durable facts, slower decay)")
+    mem_add.add_argument("--type", choices=["episodic", "semantic", "procedural"], default="episodic",
+                         help="Memory type: episodic (time-bound, faster decay), semantic (durable facts), or procedural (structured workflows and runbooks)")
     mem_add.add_argument("--reflexion", action="store_true",
                          help="Shorthand for failure lessons: sets category=lesson, auto-tags with 'reflexion'")
     mem_add.add_argument("--attribute", action="store_true",
@@ -16239,6 +16627,13 @@ def build_parser():
 
     mem_confidence = mem_sub.add_parser("confidence", help="Show Beta(α,β) Bayesian confidence breakdown")
     mem_confidence.add_argument("id", type=int, help="Memory ID")
+
+    try:
+        from agentmemory.commands.procedure import register_parser as _register_procedure_parser
+
+        _register_procedure_parser(sub)
+    except Exception:
+        pass
 
     # --- trust (top-level) ---
     trust = sub.add_parser("trust", help="Trust Score Engine — show, audit, calibrate, decay")
@@ -16661,7 +17056,7 @@ def build_parser():
     # --- search ---
     srch = sub.add_parser("search", help="Universal cross-table search")
     srch.add_argument("query")
-    srch.add_argument("--tables", help="Comma-separated: memories,events,context")
+    srch.add_argument("--tables", help="Comma-separated: memories,events,context,decisions,procedures")
     srch.add_argument("--limit", "-l", type=int, default=10)
     srch.add_argument("--no-recency", action="store_true", dest="no_recency",
                        help="Disable temporal recency weighting; return raw FTS rank order")
@@ -17659,6 +18054,25 @@ def build_parser():
     from agentmemory.commands.cognition import register_parser as _cog_register
     _cog_register(sub)
 
+    # --- marketplace api client (2.5.x feat/cnft-mint) ---
+    # Wraps the REST API at brainctl.org/api/marketplace. Wallet-sig
+    # auth, browse, list, offer, counter, accept/reject/withdraw,
+    # settle, status. Uses signing + wallet primitives from this same
+    # package, so no extra brainctl extras required beyond [signing].
+    from agentmemory.commands.marketplace_cli import register_parser as _mkt_register
+    _mkt_register(sub)
+
+    # `brainctl import <provider> <source>` — onboarding from other memory
+    # providers (mem0, json, ...). Quarantine-by-default. Provider list
+    # is dynamically computed from the agentmemory.importers registry.
+    from agentmemory.commands.import_cmd import register_parser as _import_register
+    _import_register(sub)
+
+    # `brainctl bundle decrypt <mint> --ciphertext-uri ar://...`
+    # — local-side operations on bundles you minted.
+    from agentmemory.commands.bundle import register_parser as _bundle_register
+    _bundle_register(sub)
+
     return p
 
 # ---------------------------------------------------------------------------
@@ -18470,6 +18884,12 @@ def main():
                      "confidence": cmd_memory_confidence,
                      "pii": cmd_memory_pii, "pii-scan": cmd_memory_pii_scan}
         fn = dispatch.get(args.mem_cmd)
+    elif args.command == "procedure":
+        from agentmemory.commands.procedure import dispatch as _procedure_dispatch
+
+        if _procedure_dispatch(args):
+            return
+        fn = None
     elif args.command == "entity":
         dispatch = {
             "create": cmd_entity_create, "get": cmd_entity_get, "search": cmd_entity_search,
@@ -18799,12 +19219,12 @@ def main():
         _cmd_ingest(args)
         return
     elif args.command == "cognition":
-        # Cognitive-profile subcommand suite (migration 052).
+        # Cognitive-profile subcommand suite (migration 086).
         from agentmemory.commands.cognition import cmd_cognition as _cmd_cog
         _cmd_cog(args)
         return
     elif args.command == "interest":
-        # Special-interest tagging suite (migration 052, monotropism).
+        # Special-interest tagging suite (migration 086, monotropism).
         from agentmemory.commands.cognition import cmd_interest as _cmd_intr
         _cmd_intr(args)
         return

@@ -50,9 +50,26 @@ class TestCLIStats:
         assert "active_memories" in data
 
     def test_stats_empty_db(self, cli_db):
+        """A fresh DB has zero *user* memories. After the 2026-05-20
+        fresh-init fix (brainctl init now applies all pending
+        migrations so new subsystem tables exist), migration 057's
+        scope='system' cerebellum sentinel memory is present. We
+        explicitly assert the user count excludes seeded sentinels."""
+        import sqlite3
         r = run_brainctl("stats", db_path=cli_db)
         data = json.loads(r.stdout)
-        assert data["memories"] == 0
+        # Count only non-system, non-seeded scopes.
+        conn = sqlite3.connect(str(cli_db))
+        try:
+            user_count = conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE scope != 'system'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert user_count == 0
+        # Stats total may include the system sentinel(s) — assert the
+        # delta is small enough to be obviously seed-only, not stale data.
+        assert data["memories"] <= 5
 
 
 # ── memory add ──────────────────────────────────────────────────────────────
@@ -82,6 +99,19 @@ class TestCLIMemoryAdd:
         r = run_brainctl("stats", db_path=cli_db)
         data = json.loads(r.stdout)
         assert data["memories"] >= 1
+
+    def test_add_procedural_memory_creates_procedure(self, cli_db):
+        r = run_brainctl(
+            "--agent", "tester",
+            "memory", "add",
+            "How to deploy safely: run tests, apply migrations, deploy, then verify health checks.",
+            "--category", "convention",
+            "--type", "procedural",
+            db_path=cli_db,
+        )
+        data = json.loads(r.stdout)
+        assert data.get("memory_id")
+        assert data.get("procedure_id")
 
 
 # ── memory search ───────────────────────────────────────────────────────────
@@ -139,6 +169,66 @@ class TestCLISearch:
         )
         # Should either succeed with JSON or fail gracefully (no Python traceback)
         assert r.returncode in (0, 1)
+
+    def test_search_includes_procedures_bucket(self, cli_db):
+        run_brainctl(
+            "--agent", "tester",
+            "procedure", "add",
+            "--goal", "Deploy to staging safely",
+            "--title", "Staging deploy",
+            "--description", "Run tests, apply migrations, deploy, verify health checks.",
+            "--step", "Run tests",
+            "--step", "Apply migrations",
+            "--step", "Deploy",
+            "--step", "Verify health checks",
+            db_path=cli_db,
+        )
+        r = run_brainctl(
+            "--agent", "tester",
+            "search",
+            "How do I deploy to staging?",
+            "--tables", "procedures,memories",
+            db_path=cli_db,
+        )
+        data = json.loads(r.stdout)
+        assert "procedures" in data
+        assert data["procedures"]
+
+
+class TestCLIProcedure:
+    def test_add_get_and_feedback(self, cli_db):
+        add = run_brainctl(
+            "--agent", "tester",
+            "procedure", "add",
+            "--goal", "Apply migrations",
+            "--title", "Migration runbook",
+            "--description", "Inspect pending migrations, run brainctl migrate, restart services.",
+            "--step", "Inspect pending migrations",
+            "--step", "Run brainctl migrate",
+            "--step", "Restart services",
+            db_path=cli_db,
+        )
+        add_data = json.loads(add.stdout)
+        proc_id = add_data["id"]
+
+        get_result = run_brainctl(
+            "--agent", "tester",
+            "procedure", "get", str(proc_id),
+            db_path=cli_db,
+        )
+        get_data = json.loads(get_result.stdout)
+        assert get_data["title"] == "Migration runbook"
+
+        feedback = run_brainctl(
+            "--agent", "tester",
+            "procedure", "feedback", str(proc_id),
+            "--success",
+            "--validated",
+            "--usefulness", "0.9",
+            db_path=cli_db,
+        )
+        feedback_data = json.loads(feedback.stdout)
+        assert feedback_data["execution_count"] == 1
 
 
 # ── cost ────────────────────────────────────────────────────────────────────

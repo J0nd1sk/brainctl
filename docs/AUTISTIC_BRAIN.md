@@ -1,8 +1,8 @@
 # Autistic-brain features (cognitive profiles, 2.5.2+)
 
-> **Status:** introduced in migration 052 (May 2026). Default behavior is
+> **Status:** introduced in migration 086 (May 2026). Default behavior is
 > unchanged — every existing agent gets `cognitive_profile = 'neurotypical'`
-> on backfill, and every gate falls back to its pre-052 hardcoded constants
+> on backfill, and every gate falls back to its pre-086 hardcoded constants
 > when no profile is supplied.
 
 This is a design statement: **autistic cognition is different, not worse.**
@@ -124,7 +124,7 @@ in the predictive-coding literature for autistic perceptual judgments
 (Lawson, Rees & Friston 2014, "An aberrant precision account of
 autism," Frontiers in Human Neuroscience, 8: 302).
 
-## Schema additions (migration 052)
+## Schema additions (migration 086)
 
 ```sql
 -- agents
@@ -141,7 +141,7 @@ ALTER TABLE affect_log ADD COLUMN sensory_load REAL;
 ALTER TABLE affect_log ADD COLUMN sensory_dimensions TEXT;          -- JSON
 ```
 
-All columns are nullable or default to a value that preserves pre-052
+All columns are nullable or default to a value that preserves pre-086
 behavior. Re-running `brainctl migrate` on a fresh DB applies them
 idempotently; on an existing DB, the runner tolerates duplicate-column
 errors so re-application is a no-op.

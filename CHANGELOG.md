@@ -5,6 +5,598 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2.8.1] — 2026-10-23 — *hotfix: MCP install crash + search index loss*
+
+### Fixed
+
+- **MCP server crashed on fresh install.** The `mcp` requirement had no
+  upper bound and now resolves to mcp 2.x, which removed the low-level
+  `Server` decorator API. Pinned `mcp>=1.27.0,<2.0.0` (PR #171).
+- **New memories vanished from keyword search.** Three compounding FTS5
+  bugs:
+  - `brainctl init` never seeded the external-content index (#151, PR #167,
+    migration 084; startup self-heal now also rebuilds when the index has
+    fewer rows than active memories).
+  - The `memories_fts` update triggers fired on every column, so metadata
+    writes (recall boosts on each search hit) eroded the index (#152,
+    PR #166, migration 083).
+  - The scoped trigger pair fired insert-then-delete (SQLite runs
+    same-event triggers newest-first), so category-only and same-text
+    updates still dropped the row. Migration 085 recreates the pair in the
+    right order; the MCP startup self-heal detects and repairs mis-ordered
+    triggers.
+- `brainctl vec reindex` ImportError on `sample_db_embedding_widths` (#160).
+- `vsearch` aborted when `vec_events` / `vec_context` don't exist (#161).
+- `dream-cycle` NREM crash comparing naive and aware datetimes (#168).
+- `brainctl-mcp` without the `[mcp]` extra printed a raw
+  `ModuleNotFoundError`; it now prints the install command (#159, PR #170).
+
+### Included from main since 2.8.0
+
+- `brainctl-mcp` auto-migrates `brain.db` on startup.
+- PyInstaller spec + release workflow for a standalone macOS arm64
+  `brainctl-mcp` bundle.
+- `brainctl-mcp-http` defaults to the visible v2 tool surface.
+- `--list-tools` honours `BRAINCTL_ALLOWED_TOOLS`.
+
+## [2.8.0] — 2026-05-20 — *16 brain subsystems + v2 MCP tool surface (PR #138)*
+
+This release lands the issue #116 brain-architecture work and consolidates
+the MCP tool surface to fit harness caps. Supersedes overnight PRs
+#120–#137 as a single coherent artifact.
+
+### Added — 16 brain-region / nucleus subsystems (Phase 1)
+
+Migrations **067–082** introduce schemas + dispatch for: locus coeruleus
+(phasic NE), nucleus basalis (phasic ACh + `bg_modulators.acetylcholine`),
+ARAS (arousal / sleep-wake), habenula (negative prediction), hippocampus
+CA1 + subiculum, workspace bandwidth, connectome, sleep architecture,
+VTA / SNc dopamine pathways, septum theta, raphe, memory aging
+(synaptic tagging-and-capture, Frey & Morris), claustrum, colliculi,
+mammillary (Papez circuit), and olfactory. Each ships with an
+`mcp_tools_*.py` module, a design proposal in `docs/proposals/`, and a
+matching pytest module.
+
+### Added — Windows CI smoke
+
+`test-windows (3.12)` job verifies `brainctl init` + core test subset on
+`windows-latest`. Continue-on-error today; promotion to required after
+2–3 green PRs.
+
+### Fixed — UTF-8 read for SQL files (Windows hardening)
+
+`Path.read_text(encoding="utf-8")` explicit on every SQL-ingest site
+(`_impl.py`, `brain.py`, `migrate.py` ×3). Previously the system locale
+encoding was used, which crashed on em-dashes / arrows / γ in
+`init_schema.sql` on Windows cp1252 locales.
+
+### Fixed — fresh `brainctl init` includes every migration
+
+`init_schema.sql` now contains migrations 067–082 inlined, and `cmd_init`
+calls `migrate.run()` after `executescript()` as defense in depth.
+`acetylcholine` is declared inline in the `bg_modulators` CREATE TABLE
+to avoid a SQLite-version-dependent backfill quirk that left the column
+NULL on CI Linux SQLite 3.31.
+
+### Changed — MCP tool surface v2 (hard cutover, 370 → 100 visible)
+
+**Breaking change.** Consolidated the public MCP tool surface from 370
+named tools to **100 visible** by routing through 35 action-discriminated
+dispatchers. v1 tool functions are untouched and still callable internally
+(reverting the filter restores the v1 surface).
+
+Why:
+- Many MCP harnesses cap at ~100 visible tools.
+- 370 tool descriptions burned ~50k tokens of system-prompt overhead
+  before any agent work began. v2 cuts that to ~12k tokens.
+- The 16 brain regions shipped tonight (LC, NB, ARAS, Habenula, VTA,
+  Raphe, septum, claustrum, colliculi, mammillary, olfactory, CA1+Sub,
+  sleep, memory_aging, workspace_bandwidth, connectome) duplicated the
+  shape of 11 already-shipped regions. Tools were redundant at the
+  shape level even when the payloads were distinct.
+
+New visible surface:
+- **Primary (60 tools)** — memory_*, event_*, entity_*, agent_orient/
+  wrap_up/register, handoff_add/latest, trigger_create/check, search,
+  vsearch, pagerank, decision_add, procedure_add/get/list/search,
+  affect_*, reason/infer/think, reconsolidate, promote, free_energy_check,
+  health/stats/validate/lint/backup, dream_cycle, abstract_summarize,
+  zoom_in/out, push, wallet_create/show, weights, whosknows.
+- **Subsystem dispatchers (7 tools)** — subsystem_list, subsystem_status,
+  subsystem_list_actions, subsystem_emit, subsystem_register,
+  subsystem_history, subsystem_configure. Cover 27 brain subsystems.
+- **Topic dispatchers (22 tools)** — belief, tom, trust, reflexion,
+  gaps, federated, world, workspace, temporal, consolidation, expertise,
+  neuro, meb, quarantine, epoch, usage, schedule, task, policy,
+  knowledge, context, lifecycle.
+- **Admin dispatchers (6 tools)** — entity_admin, memory_admin,
+  agent_admin, handoff_admin, trigger_admin, procedure_admin.
+
+Hidden (still callable internally): 270 v1 tool names — full list at
+`mcp_tools_consolidated.py:DEPRECATED_TOOL_NAMES`.
+
+Migration: `docs/TOOL_MIGRATION_V2.md` has the full old→new mapping.
+Common pattern: `lc_fire(...)` → `subsystem_emit(name="lc", action="fire", payload={...})`.
+
+Rollback: remove the `_VISIBLE_TOOL_NAMES = _ALL_TOOL_NAMES - _V2_DEPRECATED`
+filter in `mcp_server.py:list_tools` and the v1 surface returns immediately.
+Or `git revert` the consolidation commit. The underlying Python tool
+functions are untouched in every case.
+
+Measured impact:
+- Visible tool count: 260 → 100
+- Tool description tokens in system prompt: ~40k → ~12k
+- `list_tools()` response time: <1ms (negligible change)
+- Cold-start import: ~340ms (no change vs. v1)
+- `tests/bench/run --check`: P@1=0.60 / P@5=0.18 / Recall@5=0.51 (zero delta)
+
+### Added — 16 new brain-region / subsystem Phase 1s (overnight 2026-05-20)
+
+Migrations 067-082 + their MCP tools (now accessed via `subsystem_*`
+dispatchers — see v2 consolidation entry above). Each is Phase 1
+inspection-only / additive — no behavior change to retrieval or
+existing subsystems.
+
+- **Migration 067** — Locus Coeruleus (NE source / +surprise broadcaster).
+  Codex-authored under orchestration.
+- **Migration 068** — Nucleus Basalis (ACh / attention broadcaster).
+  Adds `acetylcholine` column to `bg_modulators` (4th dial).
+- **Migration 069** — ARAS (global arousal / 6-stage sleep-wake state).
+- **Migration 070** — Habenula (anti-reward / negative-PE channel).
+- **Migration 071** — Hippocampus CA1 + Subiculum (trisynaptic loop
+  completion; match/mismatch + cortical bridge).
+- **Migration 072** — Workspace bandwidth limit (top-K-per-epoch on
+  workspace_broadcasts).
+- **Migration 073** — Connectome graph (22-node inter-subsystem comm
+  graph; bg_modulators is the top-degree hub).
+- **Migration 074** — Sleep architecture (5-stage state machine with
+  per-stage permitted_operations CSV).
+- **Migration 075** — VTA/SNc (DA source nucleus + pathway catalog).
+- **Migration 076** — Septum + theta rhythm (4-8 Hz pacemaker, 8 bins
+  per cycle, phase-lock tracking).
+- **Migration 077** — Raphe nuclei (5-HT source; DRN + MRN subtypes).
+- **Migration 078** — Memory aging (synaptic tagging-and-capture;
+  tag at write, capture-within-window or demote).
+- **Migration 079** — Claustrum (cross-modal retrieval binding;
+  9 modalities catalogued).
+- **Migration 080** — Colliculi (SC + IC orienting reflex;
+  novel-pattern triggers).
+- **Migration 081** — Mammillary Bodies + Papez circuit (episodic
+  consolidation transit log).
+- **Migration 082** — Olfactory cortex (direct sensory-emotional
+  imprints; bypasses thalamus, Proust effect).
+
+Plus the issue #116 Phase 1-A pathway log (migration 066), sigmoid
+read-gate (`agentmemory.sigmoid_gate`), motivational entry gate
+(`agentmemory.motivational_gate`), and the research-avenues memo at
+`research/autonomous-research-avenues-2026-05-20.md`.
+
+Test totals: 141 new test cases across 16 modules, all green. Bench
+harness (`tests/bench/run --check`) confirms zero retrieval regression.
+
+### Added — issue #116 Phase 1-A: retrieval pathway log
+
+External architecture memo (issue #116, "Thalamus, Basal Ganglia, and
+Cerebellum: Toward a Biologically Grounded Architecture for brainctl",
+by Claude + @crystalwizard) was audited against shipped reality at
+v2.7.0 plus the final brain batch (migrations 050-065). Most of the
+memo's proposed feedback-loop infrastructure is already shipped —
+`bg_td_events` is the TD-error broadcast bus, `bg_striatal_weights`
+hold 5-expectile distributional value (richer than the memo's
+proposed `(m, s)`), `cerebellum_modules.oculomotor_partner` predicts
+retrieval relevance, and the actor-critic loop runs on every
+dispatch in shadow mode. The audit + comparison live in
+`research/issue-116-audit-vs-origin-main.md` and
+`research/issue-116-comparison.md`.
+
+The real residual gap is **pathway-fingerprint indexability**: the
+BG learns at `(action, context_hash)` granularity, but cannot
+distinguish FTS-mode from vector-mode from hybrid-RRF-mode retrievals
+because that distinction lives inside the `memory_search` arguments,
+not in any indexed field. This release closes that gap.
+
+- **Migration 066** — `retrieval_pathway_log` table. One row per
+  `cmd_search` invocation. Records: mode (`fts` / `hybrid-rrf` /
+  `vector`), `table_distribution` (which tables produced hits), the
+  `tables_searched` set after intent-router + profile routing,
+  candidate counts, latency, intent label, active profile, embedding
+  model version, and a query hash for cluster lookup. Schema also
+  reserves `rrf_contribution_ratio`, `suppressed_strategies`, and a
+  loose `linked_td_event_id` for Phase 1-B+ and later joiners. Five
+  indexes (recent, agent+time, mode+time, intent+time, unlinked).
+
+- **`agentmemory.retrieval_pathway_log`** — new module with
+  `emit_pathway_log(...)` and `table_distribution_from_results(...)`.
+  Best-effort: never raises, never blocks. Gated behind
+  `BRAINCTL_PATHWAY_LOG=0` env-var kill switch.
+
+- **`cmd_search` hookpoint** — one new emit call near the output
+  assembly site. Pre-hook `db.commit()` releases the implicit
+  writer transaction that `get_db()`'s `isolation_level=""` opens
+  on prior DML (access_log / salience updates), so the pathway-log
+  helper's separate autocommit connection isn't locked out in WAL
+  mode. `db_path` is plumbed through so programmatic callers
+  (`Brain.search` against a custom DB) log to their own store.
+
+- **Tests** — `tests/test_retrieval_pathway_log.py`. 5 tests covering
+  schema, emission, kill switch, missing-table degradation, and the
+  table_distribution helper.
+
+Phase 1-C (smooth sigmoid read-gate threshold) is the remaining
+planned follow-up. Phase 4 enforcement readiness review is gated
+on accumulating 4+ weeks of pathway data before deciding whether
+the BG/cerebellum loops are calibrated enough to flip from shadow
+to enforcement.
+
+### Added — issue #116 Phase 1-B: motivational entry gate (shadow)
+
+Composes the active search profile and the classified intent label
+into a declarative suppression list of retrieval strategies that
+the memo (issue #116 §2.4) argues are categorically incompatible
+with the current task context. Strategy taxonomy adapted to
+brainctl's actual retrieval features:
+
+- ``procedural_lookup`` — search the `procedures` table
+- ``episodic_association`` — search the `events` table
+- ``temporal_chain_traversal`` — apply `--temporal-expand-hours`
+
+Profile suppressions (`writing`, `research`, `meeting`, `ops`,
+`networking`) and intent suppressions (`entity_lookup`,
+`decision_rationale`, `historical_timeline`, `task_status`,
+`how_to`, `troubleshooting`) compose by union — both signals add to
+the suppression list, neither overrides.
+
+Default mode is **shadow**: `cmd_search` computes the suppression
+list and writes it into `retrieval_pathway_log.suppressed_strategies`
+but does **not** modify retrieval behavior. Flips to **enforce**
+mode via `BRAINCTL_MOTIVATIONAL_GATE_ENFORCE=1`, at which point
+suppressed tables are removed from the fetch list and suppressed
+feature flags are zeroed before retrieval runs. Always preserves at
+least one table — the gate never starves retrieval of all candidates.
+
+- **`agentmemory.motivational_gate`** — new module exposing
+  `PROFILE_SUPPRESSIONS`, `INTENT_SUPPRESSIONS`, `compute_suppressions(...)`,
+  `apply_suppressions(...)`, `is_enforce_enabled()`. Pure functions,
+  no DB access, no side effects.
+
+- **`cmd_search` hookpoint** — computed early (after intent
+  classification, before the query planner runs) so the suppression
+  list is available for both the pathway log emission and, in
+  enforce mode, the table fetch. Failures swallow to an empty list
+  so a broken gate cannot break search.
+
+- **Tests** — `tests/test_motivational_gate.py`. 11 tests covering
+  profile-only, intent-only, composition, empty/unknown inputs,
+  table removal, temporal-expansion zeroing, safety floor
+  (never empties tables), no-op-when-empty, enforce env-var parsing,
+  and a sanity check that all mapping values resolve to known
+  strategies.
+
+- **Pathway log integration** — `cmd_search` now passes the
+  suppression list to `emit_pathway_log` via the existing
+  `suppressed_strategies` parameter, populating the column reserved
+  in migration 066. The pathway log thus captures shadow-mode gate
+  decisions for later calibration.
+
+Phase 1-C (smooth sigmoid read-gate threshold) is the remaining
+planned follow-up before the Phase 4 enforcement readiness review.
+
+## [2.7.0] — 2026-05-13 — *Procedural memory layer (Velamj, PR #94)*
+
+The third memory type. brainctl now treats Tulving's 1972 tripartite
+typology as a first-class data model: `episodic`, `semantic`, and
+new in 2.7.0, `procedural`. Procedures are reusable workflow patterns
+(tool sequences, decision recipes, recovery playbooks) with their own
+canonical table, FTS5-backed search, and execution-feedback loop.
+
+**Provenance note:** this primitive was contributed by [Velamj] as
+[PR #94] on 2026-04-24, **19 days before** any of the public competing
+implementations in the agent-memory space. Shipping it as the headline
+v2.7.0 feature.
+
+[Velamj]: https://github.com/Velamj
+[PR #94]: https://github.com/TSchonleber/brainctl/pull/94
+
+### Added
+
+- **Procedural memory layer** (`src/agentmemory/procedural.py`,
+  +1679 LOC). Canonical procedure tables (`procedures`,
+  `procedure_steps`, `procedure_sources`) added via migration 052,
+  plus an FTS5 virtual table for `procedure_search`. Bridge synopsis
+  rows are kept in `memories` so legacy memory search still surfaces
+  procedures by their text content.
+
+- `brainctl procedure ...` CLI subcommand surface — `add`, `get`,
+  `list`, `search`, `update`, `feedback`, `backfill`, `stats`. The
+  `feedback` subcommand records execution outcomes and updates a
+  procedure's quality counters + status so successful patterns
+  accumulate reuse signal.
+
+- **8 new MCP tools** (now 209 total, was 201) for the same surface:
+  `procedure_add`, `procedure_get`, `procedure_list`,
+  `procedure_search`, `procedure_update`, `procedure_feedback`,
+  `procedure_backfill`, `procedure_stats`.
+
+- `docs/PROCEDURAL_MEMORY_MIGRATION.md` documents the migration
+  envelope (`PRAGMA foreign_keys=OFF; BEGIN; ... COMMIT;`), the
+  schema_versions-only-on-success contract, backward-compat
+  expectations for legacy episodic/semantic readers, and the
+  rollout discipline for mixed-version operators.
+
+### Tests
+
+- 70 new procedural-targeted tests (`test_procedural.py`,
+  `test_mcp_tools_procedural.py`, additions to `test_migrate.py`
+  and `test_validation.py`). Full suite green at 2225 passed,
+  13 skipped, 2 xfailed (fresh-venv `[all]` install).
+
+### Doc counts updated
+
+- `MCP_SERVER.md` + `scripts/check_docs.py` asserts: 201 → 209 MCP
+  tools. `brainctl-mcp --list-tools` reflects the new surface.
+
+## [2.6.4] — 2026-05-13 — *Fix #114: BRAINCTL_ALLOWED_TOOLS for tool-capped MCP clients*
+
+### Added
+
+- `BRAINCTL_ALLOWED_TOOLS` env var on the stdio MCP server. When set
+  to a comma-separated list of tool names, `tools/list` returns only
+  the named tools and `tools/call` rejects everything else. When
+  unset (the default), the full 201-tool surface is exposed —
+  backward compatible for clients without tool caps.
+
+  Required for clients that enforce a hard cap on total MCP tools
+  (Google's Antigravity IDE caps at 100; with brainctl's 201 surface,
+  the IDE refused to load the server at all). Example:
+
+  ```json
+  "env": {
+    "BRAINCTL_ALLOWED_TOOLS":
+      "memory_add,memory_search,event_add,event_search,entity_create,
+       entity_get,entity_observe,entity_relate,entity_search,
+       decision_add,handoff_add,handoff_latest,handoff_consume,
+       trigger_create,trigger_list,trigger_check,stats,agent_orient,
+       agent_wrap_up,validate,lint"
+  }
+  ```
+
+- Hard-fail on unknown tool names at process start. A typo like
+  `memory-add` (hyphen) prints a clear error pointing at
+  `memory_add` (underscore) via `difflib.get_close_matches` —
+  prevents silent misconfigurations.
+
+### Design notes
+
+- The HTTP transport's `BRAINCTL_HTTP_ALLOWED_TOOLS` (v2.5.0) is
+  REQUIRED + must be non-empty (security default: no allowlist → no
+  remote service). The stdio variant is OPTIONAL by default for
+  backward compatibility — stdio clients spawn the server locally
+  and are trusted; we don't want to break every existing brainctl
+  user's MCP config by suddenly making the env var mandatory.
+- Both variants now hard-fail on unknown tool names (stdio: at module
+  import; HTTP: already raised at startup in v2.5.0). No silent
+  warnings.
+
+### Tests
+
+- 18 round-trip tests covering: unset / empty / whitespace-only env
+  → no filter; valid names → exact filter applied; unknown name →
+  SystemExit with helpful "did you mean X?" suggestions; whitespace
+  trimming; allowed call passes the gate; disallowed call raises
+  ValueError mentioning the env var.
+- Full suite: 2112 passed, 28 skipped, 2 xfailed.
+
+## [2.6.3] — 2026-05-13 — *Wallet export-key: Phantom-compatible private-key export*
+
+### Added
+
+- `brainctl wallet export-key` — print or save the wallet's secret as
+  a **base58 private key** in the format every standard Solana wallet
+  UI accepts under "Import private key" (Phantom, Backpack, Solflare,
+  Glow). Required because `wallet export` writes the Solana CLI
+  64-int JSON format which those wallets do not accept.
+
+  Two modes:
+    - default: secret printed to stdout (with stderr SAFETY warnings)
+    - `-o <path>`: secret written to the file at mode 0600; JSON
+      payload elides the secret to prevent piping leaks
+
+  brainctl wallets are NOT BIP39-mnemonic-derived (they're ed25519
+  keypairs generated directly), so the base58 secret IS the recovery —
+  there is no separate seed phrase. The CLI prints prominent SAFETY
+  warnings explaining this and the wallet-UI import paths for each
+  supported wallet.
+
+### Documentation
+
+- README + CLAUDE.md updated to reference `wallet export-key`.
+
+### Tests
+
+- 5 new round-trip tests confirming the base58 secret decodes to a
+  valid solders Keypair, matches the wallet address, writes to disk
+  at 0600 with secret elided from the JSON payload, and handles
+  existing files / force / missing-wallet edge cases correctly.
+
+## [2.6.2] — 2026-05-13 — *Fix #108: brainctl-mcp idle-timeout no longer kills stdio servers*
+
+### Fixed
+
+- **`brainctl-mcp` no longer self-terminates after 1h idle on stdio**
+  (closes #108). Stdio MCP clients (Claude Desktop, Codex, Cursor)
+  own the process lifecycle, so killing the server out from under
+  them left the agent without memory tools until manual restart, with
+  no upstream warning surfaced to the user. The `BRAINCTL_MCP_IDLE_TIMEOUT_SEC`
+  default is now `0` (disabled) instead of `3600` (1h). The
+  parent-death watchdog stays active — that's the actually load-bearing
+  safety net for orphaned children when Claude Desktop crashes.
+
+### Changed
+
+- `BRAINCTL_MCP_IDLE_TIMEOUT_SEC` semantics:
+  - `0`, empty, garbage, or negative → disabled (no idle check at all)
+  - `1..59` → clamps up to `60` (sub-minute idle timeouts can kill the
+    server mid-LLM-thought)
+  - `>= 60` → honored verbatim
+- Loop now skips the idle check entirely when the timeout is `0`.
+
+### Documentation
+
+- New section in `docs/AGENT_ONBOARDING.md` covering the MCP server
+  lifecycle watchdog (parent-death detection, idle-timeout reaping,
+  the three relevant env vars).
+
+### Tests
+
+- Six lifecycle tests updated/added for the new defaults:
+  disabled-by-default, explicit-zero, sub-minute clamp, explicit
+  honored value, garbage → disabled, negative → disabled. New test
+  `test_watchdog_skips_idle_check_when_timeout_is_zero` confirms the
+  loop runs cleanly through an "idle forever" state.
+
+## [2.6.1] — 2026-05-13 — *Onboarding from other providers + local bundle decrypt*
+
+Two launch-readiness additions on top of v2.6.0.
+
+### Added
+
+- `brainctl import <provider> <source>` — onboard memories from
+  other providers into brain.db. Quarantine-by-default into scope
+  `imported:<provider>` so the agent's primary scope stays clean
+  until the user explicitly promotes specific records via
+  `brainctl memory promote`.
+
+  Shipped providers:
+
+  - `brainctl import mem0 <export.json>` — parses every mem0 export
+    shape (SDK `{"results":[...]}`, `{"memories":[...]}`, legacy
+    top-level list). mem0-only fields (score, app_id, run_id,
+    categories, labels) round-trip via the memory's source_metadata.
+  - `brainctl import json <records.json>` — generic JSON / JSONL.
+    Accepts list root, `{"memories":[...]}`, `{"data":[...]}`,
+    `{"records":[...]}`. Required record field is `content`;
+    everything else is optional.
+
+  CLI flags: `--scope`, `--category`, `--no-quarantine`, `--dry-run`,
+  `--json`. Uses the canonical `cmd_memory_add` path so FTS5 indexes,
+  vec embeddings, and scope/tag persistence stay consistent.
+  Provider registry under `src/agentmemory/importers/`; adding a new
+  provider is a three-step BaseImporter subclass + register_importer
+  call (zep / cognee / letta / langchain are the natural next ones).
+
+- `brainctl bundle decrypt <mint> --ciphertext-uri ar://...` —
+  local-side AES decryption of a bundle you minted yourself. Reads
+  the per-bundle key from `~/.brainctl/keys/<mint>.key`, fetches
+  ciphertext from Arweave, AES-256-GCM decrypts, streams the
+  plaintext bundle JSON to stdout (or `-o <path>`).
+
+  Closes the "I minted but can't read my own bundle without writing
+  Python" gap. The companion `send-key` / `receive-key` commands for
+  gifting decryption capability to another wallet are roadmap
+  (v2.6.2+); the marketplace settle flow remains the only turnkey
+  key-handoff path for now.
+
+### Tests
+
+- 17 new round-trip tests for the importers (mem0 SDK shape, mem0
+  legacy shape, JSON list, JSON wrapped, JSONL, missing-content
+  skips, malformed-input rejections, tag-extraction edge cases).
+  Full suite: 2093 passed, 28 skipped, 2 xfailed.
+
+## [2.6.0] — 2026-05-12 — *Marketplace negotiation, protocol rename, and protocol fees*
+
+Three coordinated changes:
+
+  1. The negotiation half of the chain-canonical agent memory
+     marketplace. The REST API at brainctl.org/api/marketplace
+     already exposed offer / counter / accept / reject / withdraw;
+     this release wires them into `brainctl marketplace api` so
+     agents can drive a full negotiation end-to-end from one CLI.
+
+  2. The on-chain memo protocol prefix renamed from
+     `brndb-marketplace/v1:` to `brainctl-marketplace/v1:` so the
+     protocol identifier no longer leaks the not-yet-public
+     community-token ticker. Pre-launch cutover; no production
+     volume was on chain at the old prefix.
+
+  3. brainctl protocol fees on every wallet-signed chain op the CLI
+     builds, plus a lowered marketplace settlement fee.
+
+### Protocol fees (new)
+
+Every CLI-initiated chain transaction includes a small protocol-fee
+transfer to a public treasury wallet. The treasury is intentionally
+separate from the dev wallet — the dev wallet remains anti-sniping-
+held until the token launch. Defaults (calibrated to SOL ≈ \$200):
+
+  * `--sign --pin-onchain`        0.0005 SOL  (~\$0.10)
+  * `marketplace api list`        0.0005 SOL  (~\$0.10)
+  * `marketplace api offer`       0.0005 SOL  (~\$0.10)
+  * `marketplace api counter`     0.0005 SOL  (~\$0.10)
+  * `marketplace api accept`      0.0005 SOL  (~\$0.10)
+  * `marketplace api reject`      0.0005 SOL  (~\$0.10)
+  * `marketplace api withdraw`    0.0005 SOL  (~\$0.10)
+  * `marketplace api cancel`      0.0005 SOL  (~\$0.10)
+  * `export --sign --mint`        0.0025 SOL  (~\$0.50)
+  * `marketplace api settle`      2.5% of trade  (replaces 3.5%)
+  * marketplace JIT mint at settle  free  (seller already paid 2.5%)
+  * pure offline `export --sign`  free  (no chain interaction)
+  * devnet                        free  (all ops)
+
+Treasury wallet (hardcoded default):
+
+  `AYyx94RdL4LpBozqZahQ37Q3ziKEoiGZnypp8h9WwW4D`
+
+Env overrides for fees and treasury are in
+`agentmemory.protocol_fees`. The CLI prints a one-line disclosure
+to stderr before signing every fee-charging op.
+
+### Marketplace settlement fee lowered
+
+`MARKETPLACE_FEE_BPS` reduced from 350 (3.5%) to 250 (2.5%) on both
+the Python client and the brainctl-launch TS indexer. No production
+volume was on chain at 350 bps, so the cutover is safe.
+
+### Added
+
+- `brainctl marketplace api offer <listing> --price-usd N` — buyer
+  submits an offer. Builds + signs the offer manifest, uploads to
+  Arweave, posts the on-chain offer memo, registers with the API. TTL
+  capped at 24h per the protocol.
+- `brainctl marketplace api counter <offer> --price-usd N` — either
+  side counters; the chain audit trail captures the full thread.
+- `brainctl marketplace api accept|reject <offer>` — seller-side.
+- `brainctl marketplace api withdraw <offer>` — offerer-side.
+- `brainctl marketplace api offers <listing>` — list visible offers
+  (auction-mode public, private-mode visible only to seller/offerer).
+- New primitives in `agentmemory.marketplace`:
+  `build_offer_manifest`, `build_counter_manifest`, `manifest_hash`,
+  `MAX_OFFER_TTL_HOURS`, plus five new `MEMO_*_PREFIX` constants and
+  formatters. `parse_memo` extended to parse all five new actions.
+
+### Changed
+
+- **Protocol memo prefix renamed** from `brndb-marketplace/v1:` to
+  `brainctl-marketplace/v1:` across both the Python client and the
+  brainctl-launch indexer/server. The previous prefix was an
+  early-design choice that coupled the protocol identifier to the
+  not-yet-launched community token ticker; the new name decouples
+  them permanently. Touches `agentmemory.marketplace.MARKETPLACE_SCHEMA`,
+  every memo formatter, `marketplace_listen.py` runtime checks,
+  `commands/marketplace_cli.py` schema strings, and `tools/zk_mint.js`.
+  Since the marketplace just opened (no production volume yet), this
+  is a clean cutover — no back-compat parser branch needed.
+- Marketplace JIT-mint cNFT branding: name `"BRNDB #<hash>"` →
+  `"brainctl memory #<hash>"`, symbol `BRNDB` → `MEM`. Pre-launch
+  test mints no longer engrave the ticker into permanent chain
+  history.
+- `tools/README.md` smoke-test JSON example: neutralized name/symbol.
+
+### Tests
+
+- 11 new round-trip tests for the negotiation memo formatters +
+  manifest builders. 67/67 marketplace tests pass.
+
 ## [2.5.1] — 2026-05-06 — *Beta-audit follow-up: MCP dispatcher + retrieval correctness*
 
 Closes the full beta-tester audit filed as issue #97 plus the Hermes

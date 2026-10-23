@@ -65,12 +65,62 @@ def test_config_rejects_short_token(monkeypatch: pytest.MonkeyPatch) -> None:
         HTTPConfig.from_env()
 
 
-def test_config_rejects_missing_allowlist(
+def test_config_missing_allowlist_defaults_to_visible_v2_surface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-2.8.1 this was a boot error. The relaxation defaults to the
+    full visible v2 surface so operators can run brainctl-mcp-http with
+    just `BRAINCTL_HTTP_TOKEN` set (the common case — Grok and other
+    remote-MCP clients narrow further on their side)."""
+    from agentmemory.mcp_server import _VISIBLE_TOOL_NAMES
+
+    monkeypatch.setenv("BRAINCTL_HTTP_TOKEN", _VALID_TOKEN)
+    monkeypatch.delenv("BRAINCTL_HTTP_ALLOWED_TOOLS", raising=False)
+    cfg = HTTPConfig.from_env()
+    assert cfg.allowed_tools == frozenset(_VISIBLE_TOOL_NAMES)
+    assert len(cfg.allowed_tools) >= 100  # visible v2 surface is ~100 tools
+
+
+def test_config_empty_allowlist_also_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`BRAINCTL_HTTP_ALLOWED_TOOLS=` (empty string) and whitespace-only
+    should resolve like unset, not raise. This avoids the gotcha where a
+    deploy template leaves the var declared but empty."""
+    from agentmemory.mcp_server import _VISIBLE_TOOL_NAMES
+
+    monkeypatch.setenv("BRAINCTL_HTTP_TOKEN", _VALID_TOKEN)
+    monkeypatch.setenv("BRAINCTL_HTTP_ALLOWED_TOOLS", "   ")
+    cfg = HTTPConfig.from_env()
+    assert cfg.allowed_tools == frozenset(_VISIBLE_TOOL_NAMES)
+
+
+def test_config_rejects_v1_deprecated_tool_in_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale allowlist containing v1-deprecated names like `lc_fire`
+    would silently shrink the wire surface to zero (v1 names are
+    callable but not visible). Hard-fail at boot with a migration hint
+    instead — same contract as stdio's BRAINCTL_ALLOWED_TOOLS."""
+    from agentmemory import mcp_server
+
+    monkeypatch.setenv("BRAINCTL_HTTP_TOKEN", _VALID_TOKEN)
+    deprecated_sample = next(iter(mcp_server._V2_DEPRECATED))
+    monkeypatch.setenv("BRAINCTL_HTTP_ALLOWED_TOOLS", deprecated_sample)
+    with pytest.raises(ValueError) as exc:
+        HTTPConfig.from_env()
+    msg = str(exc.value)
+    assert deprecated_sample in msg
+    assert "deprecated" in msg.lower()
+    assert "TOOL_MIGRATION_V2" in msg
+
+
+def test_config_rejects_unknown_tool_in_allowlist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("BRAINCTL_HTTP_TOKEN", _VALID_TOKEN)
-    monkeypatch.delenv("BRAINCTL_HTTP_ALLOWED_TOOLS", raising=False)
-    with pytest.raises(ValueError, match="ALLOWED_TOOLS"):
+    monkeypatch.setenv("BRAINCTL_HTTP_ALLOWED_TOOLS", "not_a_real_tool")
+    with pytest.raises(ValueError, match="not_a_real_tool"):
         HTTPConfig.from_env()
 
 

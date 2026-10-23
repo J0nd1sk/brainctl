@@ -1,6 +1,6 @@
 """brainctl MCP tools — cognitive profile + special-interest tagging + sensory affect.
 
-Five MCP tools, all backed by the migration-052 schema additions:
+Five MCP tools, all backed by the migration-086 schema additions:
 
   cognition_list           list built-in cognitive profiles
   cognition_show           show one profile's tunables

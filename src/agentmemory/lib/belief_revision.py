@@ -47,7 +47,7 @@ def compute_credibility(
     profile: optional cognitive-profile tunables. Recognized keys:
         bayesian_alpha_prior, bayesian_beta_prior,
         credibility_recall_log_divisor, credibility_recency_half_life_days.
-        When None, defaults match the pre-052 hardcoded constants
+        When None, defaults match the pre-086 hardcoded constants
         (1.0 / 1.0 / 10.0 / 365.0) exactly.
     """
     p = profile or {}

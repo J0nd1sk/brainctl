@@ -4,6 +4,8 @@
 
 One `brain.db` gives your agent durable memory across sessions — facts learned, decisions made, entities tracked, and state handed off. No server. No API keys. No LLM calls required.
 
+> **Saturday May 17, 2026 — the agent memory marketplace opens at [brainctl.org/marketplace](https://brainctl.org/marketplace).** Memory bundles are mintable on Solana today (`brainctl export --sign --mint`); the marketplace lets agents buy and sell those bundles with each other via `brainctl marketplace api` from the CLI. The community token launches with the marketplace and is intentionally not named on this page until then. See the [Mint section](#feature-checklist) and [Marketplace section](#feature-checklist) below for the primitives, and the [website](https://brainctl.org) for the full launch story.
+
 ```python
 from agentmemory import Brain
 
@@ -16,17 +18,33 @@ brain.wrap_up("auth module complete", project="api-v2")  # session end: logs + h
 
 ## Install
 
+Choose the install that matches how you use brainctl:
+
+Core CLI and Python library:
+
 ```bash
 pip install brainctl
 ```
 
 Requires Python 3.11+. SQLite is built-in. No other mandatory dependencies.
 
+MCP server for Claude Desktop, Cursor, or VS Code:
+
 ```bash
-pip install brainctl[mcp]     # MCP server — 201 tools for Claude Desktop, Cursor, VS Code
-pip install brainctl[vec]     # vector similarity search (sqlite-vec + Ollama)
-pip install brainctl[signing] # Ed25519-signed memory exports + optional Solana on-chain pinning
-pip install brainctl[all]     # everything
+pip install 'brainctl[mcp]'
+# or, for an isolated command-line install:
+pipx install 'brainctl[mcp]'
+```
+
+The `[mcp]` extra is required to run `brainctl-mcp`; it is an alternative to
+the core-only install, not a second package.
+
+Other optional capabilities:
+
+```bash
+pip install 'brainctl[vec]'     # vector similarity search (sqlite-vec + Ollama)
+pip install 'brainctl[signing]' # Ed25519-signed memory exports + optional Solana on-chain pinning
+pip install 'brainctl[all]'     # everything
 ```
 
 ## 5-line example
@@ -71,6 +89,20 @@ brain.relate("OpenAI", "provides", "GPT-4o")
 - 3-level enrichment tier; canonical alias dedup (`brainctl entity alias add`)
 - Spreading-activation recall across the graph (`brain.think(query)`)
 
+**Brain-region subsystems (v2.8.0)**
+
+`brainctl` models 27 brain regions / nuclei as first-class subsystems, each with its own schema, state, and event log. They cover the modulatory, attentional, motivational, mnemonic, and sensorimotor layers that real cognition runs on:
+
+- **Modulatory nuclei:** locus coeruleus (NE / phasic surprise gain), nucleus basalis (ACh / phasic attention), VTA-SNc (dopamine pathways), raphe (serotonin / horizon)
+- **Arousal / state:** ARAS (wake-sleep transitions), sleep architecture (REM/NREM cycles)
+- **Motivational gates:** habenula (negative-prediction "no-go"), septum (theta pacing)
+- **Memory mechanics:** hippocampus CA1+subiculum (mismatch detection / output), memory aging (synaptic tagging-and-capture, Frey & Morris), mammillary (Papez circuit transit)
+- **Workspace:** workspace bandwidth (global-workspace throttling), connectome (inter-region graph)
+- **Sensorimotor:** colliculi (orienting), olfactory (single-trial valence imprinting), claustrum (multimodal binding)
+- **Pre-existing (2.x):** basal ganglia, cerebellum, thalamus, amygdala, hippocampal subfields, ACC, DMN, drives, insula, PFC, entorhinal grid cells
+
+Every subsystem speaks the same dispatcher protocol (`subsystem_status`, `subsystem_emit`, `subsystem_register`, `subsystem_history`, `subsystem_configure`), so an agent that learned the shape for LC already knows how to drive raphe or claustrum. Schemas live in `db/migrations/067-082` (this release) plus the earlier brain-region migrations.
+
 **Belief revision (AGM)**
 - Belief set per agent with confidence weights
 - Conflict detection and resolution via `brainctl belief conflicts` and `brainctl belief merge`
@@ -83,6 +115,33 @@ brain.relate("OpenAI", "provides", "GPT-4o")
 - Optional: `--pin-onchain` writes the SHA-256 hash as a Solana memo transaction (~$0.001 per pin)
 - Managed wallet: `brainctl wallet new` creates a local keypair at `~/.brainctl/wallet.json` for users without an existing Solana setup
 - Memories never leave the machine; only the hash goes on-chain (opt-in)
+
+**Mint (v1, optional `[mint]` extra)**
+- `brainctl export --sign --mint` mints one Light Protocol compressed token per signed bundle, owned by your brainctl wallet
+- Bundle content is AES-256-GCM encrypted **before** anything touches a public storage layer (Arweave) — the chain stores ownership, never plaintext
+- Each mint creates a Memory NFT-style token: scannable in any Solana wallet, transferable via Tensor / Magic Eden out of the box, ~$0.0001 per mint (Light Protocol's compressed-token program)
+- Devnet by default; mainnet-beta requires `--cluster mainnet-beta` and a Helius API key
+- Setup: `pip install 'brainctl[mint]'` then `cd tools && npm install` (the actual mint runs in a Node helper because Light Protocol's SDK is TypeScript-only as of v0.23)
+- Foundation for the agent-to-agent memory marketplace; see `CLAUDE.md` § "Mint" for the full agent flow
+
+**Marketplace (v1.5, optional `[marketplace]` extra)**
+- `brainctl marketplace api ...` drives the chain-canonical memory marketplace at [brainctl.org/marketplace](https://brainctl.org/marketplace)
+- Sellers list signed *proofs* (not pre-minted tokens); the cNFT is forged just-in-time at settlement, one fresh mint per buyer
+- Negotiation chain on Solana memos + Arweave manifests — every state change is a signed memo so anyone can reproduce the marketplace state from chain alone
+- Buyer flow: `browse` → `show` → `settle --submit` → `status --wait --auto-decrypt --ingest` (full end-to-end in four commands)
+- Negotiated buyer flow: `offer <listing> --price-usd N` → poll `offers <listing>` → settle the accepted `offer_id`
+- Seller flow: `list` (publishes the proof) → `listen` (daemon mints cNFT + releases bundle key when payment lands)
+- Negotiation: `offers <listing>`, `offer`, `counter`, `accept`, `reject`, `withdraw` — every move is a signed memo + Arweave manifest, fully agent-callable
+- Decrypt your own minted bundle locally: `brainctl bundle decrypt <mint> --ciphertext-uri ar://...`
+
+**Import from other providers (v2.6.0)**
+- `brainctl import mem0 <export.json>` — onboard from mem0
+- `brainctl import json <records.json>` — generic JSON ingest (list or `{"memories":[...]}` shape, also `.jsonl`)
+- Quarantine-by-default: imports land in scope `imported:<provider>`; promote into your primary scope after review
+- More providers (zep, cognee, letta, langchain) coming next
+- 2.5% protocol fee at settlement, USD-pegged pricing capped at $10,000, SOL-native pre-launch (community token post-launch). Flat $0.10 fee on each list/offer/counter/accept/reject/withdraw, $0.50 on mint, $0.10 on `--pin-onchain`. Devnet is free.
+- Auth is wallet-signature based — no API keys, your Solana wallet *is* your agent identity
+- Setup: `pip install 'brainctl[marketplace]'` (adds pynacl on top of `[mint]`)
 
 **Plugins (16 first-party)**
 
@@ -112,7 +171,7 @@ Trading bots:
 | `plugins/octobot/` | OctoBot |
 | `plugins/coinbase-agentkit/` | Coinbase AgentKit |
 
-## MCP server (201 tools)
+## MCP server (100 visible tools, v2 surface)
 
 ```json
 {
@@ -124,7 +183,24 @@ Trading bots:
 }
 ```
 
-Add to `~/.claude/claude_desktop_config.json`, `~/.cursor/mcp.json`, or equivalent. Full tool list and a decision tree: [MCP_SERVER.md](MCP_SERVER.md).
+Add to `~/.claude/claude_desktop_config.json`, `~/.cursor/mcp.json`, or equivalent. Full tool list and decision tree: [MCP_SERVER.md](MCP_SERVER.md). v1→v2 name migration map: [docs/TOOL_MIGRATION_V2.md](docs/TOOL_MIGRATION_V2.md).
+
+As of 2.8.0, the public MCP surface is **100 visible tools** (370 registered internally). Tier-1 tools — `memory_add`, `memory_search`, `event_add`, `entity_*`, `agent_orient`, `agent_wrap_up`, `decision_add`, `handoff_add`, `trigger_*` — are called directly by name. Brain-region operations route through action-discriminated dispatchers:
+
+```jsonc
+// Discover what's available
+subsystem_list()                                  // 27 brain subsystems
+subsystem_list_actions(name="lc")                 // valid actions for LC
+
+// Then act
+subsystem_status(name="lc", agent_id="me")
+subsystem_emit(name="lc", action="fire",
+               payload={"trigger_name":"x", "surprise_magnitude":0.7})
+belief(action="collapse", payload={...})
+trust(action="show", payload={"agent_id":"me"})
+```
+
+The shape of the surface fits the ~100-tool cap that several MCP clients enforce (Google Antigravity, etc.) and cuts the system-prompt token cost from ~50k → ~12k. v1 tool names remain callable internally for backwards compatibility; only their visibility in `tools/list` changes.
 
 ## CLI reference
 
@@ -139,6 +215,7 @@ brainctl decide "title" -r "rationale"        # record a decision
 brainctl export --sign -o bundle.json         # signed export
 brainctl verify bundle.json                   # verify a bundle
 brainctl wallet new                           # create managed signing wallet
+brainctl wallet export-key                    # base58 private key for Phantom/Backpack/Solflare/Glow import
 brainctl stats                                # DB overview
 brainctl doctor                               # health check
 brainctl lint                                 # quality issues
@@ -310,7 +387,8 @@ Every operation accepts `agent_id` for attribution. Agents share one `brain.db`.
 | [docs/AGENT_ONBOARDING.md](docs/AGENT_ONBOARDING.md) | Step-by-step agent integration guide |
 | [docs/AGENT_INSTRUCTIONS.md](docs/AGENT_INSTRUCTIONS.md) | Copy-paste blocks for MCP, CLI, Python agents |
 | [docs/SIGNED_EXPORTS.md](docs/SIGNED_EXPORTS.md) | Bundle format, threat model, verify-without-brainctl recipe |
-| [MCP_SERVER.md](MCP_SERVER.md) | 201 tools with decision tree |
+| [MCP_SERVER.md](MCP_SERVER.md) | 100 visible tools + dispatcher decision tree |
+| [docs/TOOL_MIGRATION_V2.md](docs/TOOL_MIGRATION_V2.md) | v1→v2 tool-name migration map (used after 2.8.0 upgrade) |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Technical deep-dive |
 
 ## License

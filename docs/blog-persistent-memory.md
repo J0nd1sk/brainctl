@@ -98,7 +98,7 @@ If you're using Claude Desktop, VS Code, or Cursor, brainctl ships an MCP server
 {"mcpServers": {"brainctl": {"command": "brainctl-mcp"}}}
 ```
 
-201 tools covering memory, events, entities, decisions, triggers, handoffs, consolidation, affect tracking, and more. But you don't need to learn all 201 — the [MCP docs](https://github.com/TSchonleber/brainctl/blob/main/MCP_SERVER.md) include a decision tree showing which ~15 tools you actually need.
+100 visible tools (370 registered under the hood) covering memory, events, entities, decisions, triggers, handoffs, consolidation, affect tracking, and the full 27-region brain architecture. You don't need to learn all 100 — the [MCP docs](https://github.com/TSchonleber/brainctl/blob/main/MCP_SERVER.md) include a decision tree showing which ~15 tools you actually need, and brain-region operations route through uniform action dispatchers (`subsystem_emit(name=..., action=..., payload=...)`) so one mental model covers everything.
 
 ## Framework Integrations
 

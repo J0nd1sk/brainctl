@@ -90,13 +90,28 @@ def parse_ts(value: str) -> datetime:
     normalized = value.strip().replace("Z", "+00:00")
     if " " in normalized and "T" not in normalized:
         normalized = normalized.replace(" ", "T", 1)
-    return datetime.fromisoformat(normalized)
+    dt = datetime.fromisoformat(normalized)
+    # Timestamps in brain.db are a mix: memory_add writes aware UTC
+    # (``_utc_now_iso`` -> trailing ``Z``) while several maintenance writers
+    # used naive local ``datetime.now()``. Normalize every parsed value to
+    # aware UTC so downstream subtraction never mixes offset-naive and
+    # offset-aware datetimes (issue #168). A naive string is assumed to be
+    # UTC — exact on UTC hosts, and at most an offset-hours skew on a "days"
+    # scale elsewhere, which is negligible for aging math and never crashes.
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def days_since(now: datetime, timestamp: str) -> float:
     dt = parse_ts(timestamp)
     if dt is None:
         return 0.0
+    # ``now`` is frequently a naive ``datetime.now()`` at the call sites.
+    # Coerce it to aware UTC so it is always comparable to the aware ``dt``
+    # returned by parse_ts (issue #168).
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
     seconds = (now - dt).total_seconds()
     return max(0.0, seconds / 86400.0)
 
@@ -720,6 +735,23 @@ def cmd_consolidate(args):
         print("\n[DRY RUN] No changes written.")
     else:
         print(f"\nDone. {total_clusters} cluster(s) consolidated, {total_retired} memories retired.")
+    try:
+        from agentmemory import procedural as _procedural
+
+        synth_stats = _procedural.synthesize_procedure_candidates(
+            conn,
+            agent_id=args.agent,
+            dry_run=args.dry_run,
+        )
+        print(
+            "Procedural synthesis: "
+            f"candidates_updated={synth_stats.get('candidates_updated', 0)}, "
+            f"promoted={synth_stats.get('promoted', 0)}"
+        )
+        if not args.dry_run:
+            conn.commit()
+    except Exception as exc:
+        print(f"Procedural synthesis skipped: {exc}", file=sys.stderr)
 
 
 # =============================================================================
@@ -2279,6 +2311,18 @@ def cmd_consolidation_cycle(args):
     # Pass 7: Episodic-to-semantic promotion
     promotion_stats = promote_episodic_to_semantic(db)
 
+    # Pass 7b: repeated procedural traces -> procedure candidates / canonical procedures
+    try:
+        from agentmemory import procedural as _procedural
+
+        procedural_stats = _procedural.synthesize_procedure_candidates(
+            db,
+            agent_id=args.agent,
+            dry_run=dry_run,
+        )
+    except Exception as exc:
+        procedural_stats = {"error": str(exc), "candidates_updated": 0, "promoted": 0}
+
     # Pass 8 (CLF): Experience replay — re-process top-10 highest-recalled memories
     # Prevents catastrophic forgetting by re-anchoring important old knowledge.
     replay_stats = experience_replay(db, top_k=10, now=now)
@@ -2326,6 +2370,7 @@ def cmd_consolidation_cycle(args):
             "semantic_memories_created": promotion_stats.get("semantic_memories_created", 0),
             "source_memories_tagged": promotion_stats.get("source_memories_tagged", 0),
         },
+        "procedural_synthesis": procedural_stats,
         "experience_replay": replay_stats,
         "hebbian": hebbian_stats,
         "causal_chain_mining": causal_stats,

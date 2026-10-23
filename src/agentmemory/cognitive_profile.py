@@ -5,7 +5,7 @@ Profiles retune the existing brainctl machinery (W(m) gate, AGM conflict
 resolution, Bayesian recall priors, retrieval rerank, affect thresholds)
 rather than forking it. Each profile is a flat dict of tunables that the
 existing functions read at call time. The default profile, `neurotypical`,
-preserves brainctl's pre-052 behavior exactly — every numeric default in
+preserves brainctl's pre-086 behavior exactly — every numeric default in
 the dict matches the hardcoded constants the codebase used before.
 
 The `autistic` profile is grounded in published cognitive theories of
@@ -61,7 +61,7 @@ PROFILES: dict[str, dict[str, Any]] = {
             "uniform Bayesian priors, contradiction-collapsing entity synthesis."
         ),
         # ---- W(m) write gate weights ----
-        # Must sum to 1.0. Match the pre-052 hardcoded constants in
+        # Must sum to 1.0. Match the pre-086 hardcoded constants in
         # lib/write_decision.py:gate_write() (line 156).
         "wm_novelty_weight": 0.45,
         "wm_utility_weight": 0.25,
@@ -71,7 +71,7 @@ PROFILES: dict[str, dict[str, Any]] = {
         "wm_skip_threshold": 0.30,
         "wm_construct_threshold": 0.70,
         # ---- AGM conflict resolution ----
-        # Pre-052 default in belief_revision.resolve_conflict() was 0.05.
+        # Pre-086 default in belief_revision.resolve_conflict() was 0.05.
         "agm_threshold": 0.05,
         "agm_preserve_both_on_tie": False,
         # ---- Credibility scoring (compute_credibility) ----
@@ -166,7 +166,7 @@ def get_agent_profile_name(
 ) -> str:
     """Read the cognitive_profile column for an agent. Defaults to neurotypical.
 
-    Tolerates a missing column (pre-052 DB) and missing agent rows. Never
+    Tolerates a missing column (pre-086 DB) and missing agent rows. Never
     raises — falls back to 'neurotypical' on any failure path so this
     can be called from hot paths without a try/except wrapping every site.
     """
@@ -177,7 +177,7 @@ def get_agent_profile_name(
             "SELECT cognitive_profile FROM agents WHERE id = ?", (agent_id,)
         ).fetchone()
     except sqlite3.OperationalError:
-        # Column doesn't exist yet (migration 052 not applied).
+        # Column doesn't exist yet (migration 086 not applied).
         return "neurotypical"
     except Exception:
         return "neurotypical"

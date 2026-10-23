@@ -53,7 +53,7 @@ def run_write_gate(
         force: If True, skip the gate
         profile: Optional cognitive-profile tunables dict (see
             agentmemory.cognitive_profile). When None, gate_write uses
-            the pre-052 hardcoded defaults.
+            the pre-086 hardcoded defaults.
         agent_id: Optional agent id (for memory_stats lookup).
         db_stats: Optional sqlite3 connection to the main brain DB
             (for memory_stats lookup).
@@ -79,21 +79,38 @@ def run_write_gate(
         return (None, "", {})
 
     try:
-        return wd.gate_write(
-            candidate_blob=blob,
-            confidence=confidence,
-            temporal_class=None,
-            category=category,
-            scope=scope,
-            db_vec=vdb,
-            force=False,
-            arousal_gain=arousal_gain,
-            db_stats=db_stats,
-            agent_id=agent_id,
-            profile=profile,
-        )
-    except Exception as exc:
-        logger.debug("Write gate execution failed: %s", exc)
-        return (None, "", {})
+        try:
+            result = wd.gate_write(
+                candidate_blob=blob,
+                confidence=confidence,
+                temporal_class=None,
+                category=category,
+                scope=scope,
+                db_vec=vdb,
+                force=False,
+                arousal_gain=arousal_gain,
+                db_stats=db_stats,
+                agent_id=agent_id,
+                profile=profile,
+            )
+        except Exception as exc:
+            logger.debug("Write gate execution failed: %s", exc)
+            result = (None, "", {})
     finally:
         vdb.close()
+
+    # Shadow-consult the thalamic gate (Phase 2 of the thalamus subsystem).
+    # Records what the thalamic gate would have done; never alters the W(m)
+    # result. Silent if migration 050/053 not applied yet.
+    try:
+        from agentmemory.thalamus_shadow import consult_for_write as _thalamus_shadow_consult
+        w_score = result[0] if isinstance(result, tuple) and len(result) > 0 else None
+        _thalamus_shadow_consult(
+            scope=scope,
+            category=category,
+            surprise_score=float(w_score) if w_score is not None else 0.0,
+        )
+    except Exception as exc:
+        logger.debug("thalamus shadow consult skipped: %s", exc)
+
+    return result

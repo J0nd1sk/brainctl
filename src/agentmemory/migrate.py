@@ -68,7 +68,26 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 
-MIGRATIONS_DIR = Path(__file__).parent.parent.parent / "db" / "migrations"
+def _resolve_migrations_dir() -> Path:
+    """Locate db/migrations/ in dev checkout AND PyInstaller bundle layouts.
+
+    Dev / pip-editable install: SQL files live at <repo>/db/migrations/.
+    PyInstaller onefile bundle (brainctl-mcp sidecar): files are extracted
+    to ``sys._MEIPASS/db/migrations/`` via the ``datas=`` entry in
+    build/pyinstaller/brainctl_mcp.spec. Without the _MEIPASS branch the
+    runner falls back to a non-existent path under the bundle's temp
+    extraction root and silently reports zero pending migrations.
+    """
+    import sys as _sys
+    meipass = getattr(_sys, "_MEIPASS", None)
+    if meipass:
+        bundled = Path(meipass) / "db" / "migrations"
+        if bundled.exists():
+            return bundled
+    return Path(__file__).parent.parent.parent / "db" / "migrations"
+
+
+MIGRATIONS_DIR = _resolve_migrations_dir()
 
 
 # Errors that mean "this DDL already happened, treat as no-op". Matched
@@ -341,7 +360,7 @@ def _apply_sql(conn: sqlite3.Connection, sql: str, file_label: str) -> tuple[int
 def _pending_batch_needs_backup(pending: list[tuple[int, str, Path]]) -> bool:
     """Return true when the pending migration batch contains destructive DDL."""
     for _version, _name, path in pending:
-        if _DESTRUCTIVE_MIGRATION_RE.search(path.read_text()):
+        if _DESTRUCTIVE_MIGRATION_RE.search(path.read_text(encoding="utf-8")):
             return True
     return False
 
@@ -460,7 +479,7 @@ def run(
                 "idempotent_notes": [],
             }
     for version, name, path in pending:
-        sql = path.read_text()
+        sql = path.read_text(encoding="utf-8")
         if dry_run:
             applied.append({"version": version, "name": name, "file": path.name, "dry_run": True})
             continue
@@ -687,7 +706,7 @@ def status_verbose(db_path: str) -> dict:
 
     annotated = []
     for version, name, path in _get_migrations():
-        sql = path.read_text()
+        sql = path.read_text(encoding="utf-8")
         expected_cols = add_col_re.findall(sql)   # list of (table, col)
         expected_tbls = create_tbl_re.findall(sql)  # list of table names
 

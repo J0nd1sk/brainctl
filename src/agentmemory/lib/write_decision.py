@@ -54,7 +54,7 @@ def gate_write(
         agent_id: agent writing the memory (for memory_stats lookup)
         profile: optional cognitive-profile tunables dict (see
             agentmemory.cognitive_profile). When None, defaults match the
-            pre-052 hardcoded constants exactly. Recognized keys:
+            pre-086 hardcoded constants exactly. Recognized keys:
             wm_novelty_weight, wm_utility_weight, wm_importance_weight,
             wm_scope_weight, wm_skip_threshold.
 
@@ -68,7 +68,7 @@ def gate_write(
     if force:
         return (1.0, "", {"forced": True})
 
-    # Resolve tunables. Defaults match pre-052 behavior exactly.
+    # Resolve tunables. Defaults match pre-086 behavior exactly.
     p = profile or {}
     w_novelty    = float(p.get("wm_novelty_weight", 0.45))
     w_utility    = float(p.get("wm_utility_weight", 0.25))
@@ -167,7 +167,7 @@ def gate_write(
     long_term_utility = math.pow(cat_weight * scope_weight * recall_rate, 1.0 / 3.0)
 
     # D-MEM RPE = semantic_surprise × long_term_utility
-    # Blend weights are profile-tunable; defaults preserve pre-052 behavior
+    # Blend weights are profile-tunable; defaults preserve pre-086 behavior
     # (novelty 45 / utility 25 / importance 20 / scope 10). Autistic profile
     # shifts toward novelty (HIPPEA: high prediction-error precision).
     base_score = (

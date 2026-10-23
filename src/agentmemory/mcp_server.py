@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from agentmemory.lib.mcp_helpers import now_iso, safe_fts
+from agentmemory.lib import lifecycle as _lifecycle
 from agentmemory.paths import get_db_path
 # Import the canonical surprise scorer from _impl.py — see bug-fix note
 # below at the former _surprise_score_mcp callsite.
@@ -37,66 +38,126 @@ from mcp.server import Server
 # Extension tool modules — each exports TOOLS: list[Tool] and DISPATCH: dict
 try:
     from agentmemory import (
+        mcp_tools_acc,
         mcp_tools_agents,
         mcp_tools_allostatic,
+        mcp_tools_amygdala,
         mcp_tools_analytics,
+        mcp_tools_aras,
         mcp_tools_dmem,
+        mcp_tools_basal_ganglia,
         mcp_tools_belief_merge,
         mcp_tools_beliefs,
+        mcp_tools_cerebellum,
+        mcp_tools_claustrum,
+        mcp_tools_colliculi,
+        mcp_tools_connectome,
+        mcp_tools_consolidated,  # v2 dispatcher surface
         mcp_tools_consolidation,
+        mcp_tools_dmn,
+        mcp_tools_drives,
+        mcp_tools_entorhinal_grid,
         mcp_tools_expertise,
         mcp_tools_federation,
+        mcp_tools_habenula,
         mcp_tools_health,
+        mcp_tools_hippocampal_subfields,
+        mcp_tools_hippocampus_ca1,
         mcp_tools_immunity,
+        mcp_tools_insula,
         mcp_tools_knowledge,
         mcp_tools_lifecycle,
+        mcp_tools_locus_coeruleus,
+        mcp_tools_mammillary,
         mcp_tools_meb,
+        mcp_tools_memory_aging,
         mcp_tools_merge,
         mcp_tools_neuro,
+        mcp_tools_nucleus_basalis,
+        mcp_tools_olfactory,
+        mcp_tools_pfc,
         mcp_tools_policy,
+        mcp_tools_procedural,
+        mcp_tools_raphe,
         mcp_tools_reasoning,
         mcp_tools_reconcile,
         mcp_tools_reflexion,
         mcp_tools_scheduler,
+        mcp_tools_septum_theta,
+        mcp_tools_sleep_architecture,
         mcp_tools_telemetry,
         mcp_tools_temporal,
         mcp_tools_temporal_abstraction,
+        mcp_tools_thalamus,
         mcp_tools_tom,
         mcp_tools_trust,
         mcp_tools_usage,
+        mcp_tools_vta_snc,
         mcp_tools_workspace,
+        mcp_tools_workspace_bandwidth,
         mcp_tools_world,
         mcp_tools_cognitive,
     )
     _EXT_MODULES = [
+        mcp_tools_acc,
         mcp_tools_agents,
         mcp_tools_allostatic,
+        mcp_tools_amygdala,
         mcp_tools_analytics,
+        mcp_tools_aras,
         mcp_tools_dmem,
+        mcp_tools_basal_ganglia,
         mcp_tools_belief_merge,
         mcp_tools_beliefs,
+        mcp_tools_cerebellum,
+        mcp_tools_claustrum,
+        mcp_tools_colliculi,
+        mcp_tools_connectome,
+        mcp_tools_consolidated,  # v2 dispatcher surface — listed last so it
+                                  # registers AFTER everything else and so its
+                                  # DISPATCH includes everyone
         mcp_tools_consolidation,
+        mcp_tools_dmn,
+        mcp_tools_drives,
+        mcp_tools_entorhinal_grid,
         mcp_tools_expertise,
         mcp_tools_federation,
+        mcp_tools_habenula,
         mcp_tools_health,
+        mcp_tools_hippocampal_subfields,
+        mcp_tools_hippocampus_ca1,
         mcp_tools_immunity,
+        mcp_tools_insula,
         mcp_tools_knowledge,
         mcp_tools_lifecycle,
+        mcp_tools_locus_coeruleus,
+        mcp_tools_mammillary,
         mcp_tools_meb,
+        mcp_tools_memory_aging,
         mcp_tools_merge,
         mcp_tools_neuro,
+        mcp_tools_nucleus_basalis,
+        mcp_tools_olfactory,
+        mcp_tools_pfc,
         mcp_tools_policy,
+        mcp_tools_procedural,
+        mcp_tools_raphe,
         mcp_tools_reasoning,
         mcp_tools_reconcile,
         mcp_tools_reflexion,
         mcp_tools_scheduler,
+        mcp_tools_septum_theta,
+        mcp_tools_sleep_architecture,
         mcp_tools_telemetry,
         mcp_tools_temporal,
         mcp_tools_temporal_abstraction,
+        mcp_tools_thalamus,
         mcp_tools_tom,
         mcp_tools_trust,
         mcp_tools_usage,
+        mcp_tools_vta_snc,
         mcp_tools_workspace,
+        mcp_tools_workspace_bandwidth,
         mcp_tools_world,
         mcp_tools_cognitive,
     ]
@@ -224,6 +285,15 @@ def get_db() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
+    # Defense in depth alongside connect-level timeout=10 — when many
+    # concurrent brainctl-mcp processes contend on writes, SQLite's
+    # internal busy handler retries up to busy_timeout before raising
+    # SQLITE_BUSY. Override via env if needed (e.g. for hot-fix).
+    try:
+        bt = int(os.environ.get("BRAINCTL_DB_BUSY_TIMEOUT_MS", "10000"))
+    except ValueError:
+        bt = 10000
+    conn.execute(f"PRAGMA busy_timeout = {bt}")
     return conn
 
 
@@ -263,6 +333,28 @@ def _ensure_fts_index_consistent(conn) -> bool:
     if not active:
         return False
 
+    # Cold-start / under-populated case (issue #151): an external-content
+    # FTS5 index that was never seeded is *empty*, not *corrupt*, so
+    # 'integrity-check' below passes and the rows stay unfindable. The
+    # ``memories_fts_docsize`` shadow table holds one row per indexed
+    # document; when it lags the active-indexed count, the inverted index
+    # is missing documents and must be rebuilt.
+    try:
+        indexed_docs = conn.execute(
+            "SELECT count(*) FROM memories_fts_docsize"
+        ).fetchone()[0]
+    except sqlite3.Error:
+        indexed_docs = None
+    if indexed_docs is not None and indexed_docs < active:
+        try:
+            conn.execute(
+                "INSERT INTO memories_fts(memories_fts) VALUES('rebuild')"
+            )
+            conn.commit()
+            return True
+        except sqlite3.Error:
+            return False
+
     try:
         conn.execute(
             "INSERT INTO memories_fts(memories_fts) VALUES('integrity-check')"
@@ -278,8 +370,51 @@ def _ensure_fts_index_consistent(conn) -> bool:
             return False
     except sqlite3.Error:
         return False
-
     return False
+
+
+_SCOPED_FTS_UPDATE_TRIGGERS = """
+DROP TRIGGER IF EXISTS memories_fts_update_delete;
+DROP TRIGGER IF EXISTS memories_fts_update_insert;
+CREATE TRIGGER memories_fts_update_insert AFTER UPDATE OF content, category, tags, indexed, retired_at ON memories WHEN new.indexed = 1 AND new.retired_at IS NULL BEGIN
+    INSERT INTO memories_fts(rowid, content, category, tags)
+    VALUES (new.id, new.content, new.category, new.tags);
+END;
+CREATE TRIGGER memories_fts_update_delete AFTER UPDATE OF content, category, tags, indexed, retired_at ON memories WHEN old.indexed = 1 BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content, category, tags)
+    VALUES ('delete', old.id, old.content, old.category, old.tags);
+END;
+"""
+
+
+def _ensure_fts_triggers_scoped(conn) -> bool:
+    """Replace legacy unscoped or mis-ordered memories_fts update triggers
+    (issue #152). SQLite fires same-event triggers newest-first, so the
+    insert leg must be created before the delete leg. Idempotent; returns
+    True only if it rewrote them."""
+    try:
+        rows = conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='trigger' "
+            "AND name IN ('memories_fts_update_delete', 'memories_fts_update_insert') "
+            "ORDER BY rowid"
+        ).fetchall()
+    except sqlite3.Error:
+        return False
+    if not rows:
+        return False
+    scoped = all(r[1] and "AFTER UPDATE OF" in r[1].upper() for r in rows)
+    ordered = [r[0] for r in rows] == [
+        "memories_fts_update_insert", "memories_fts_update_delete"
+    ]
+    if scoped and ordered:
+        return False
+    try:
+        conn.executescript(_SCOPED_FTS_UPDATE_TRIGGERS)
+        conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
+        conn.commit()
+        return True
+    except sqlite3.Error:
+        return False
 
 
 def ensure_agent(conn, agent_id: str) -> None:
@@ -489,8 +624,8 @@ def tool_memory_add(agent_id: str, content: str, category: str, scope: str = "gl
         return {"ok": False, "error": f"Invalid category: {category}. Must be one of: {', '.join(VALID_MEMORY_CATEGORIES)}"}
     if not (0.0 <= confidence <= 1.0):
         return {"ok": False, "error": "confidence must be between 0.0 and 1.0"}
-    if memory_type not in ("episodic", "semantic"):
-        return {"ok": False, "error": "memory_type must be 'episodic' or 'semantic'"}
+    if memory_type not in ("episodic", "semantic", "procedural"):
+        return {"ok": False, "error": "memory_type must be 'episodic', 'semantic', or 'procedural'"}
     if scope != "global" and not scope.startswith("project:") and not scope.startswith("agent:"):
         return {"ok": False, "error": "scope must be 'global', 'project:<name>', or 'agent:<id>'"}
     if source not in _SOURCE_TRUST_WEIGHTS:
@@ -761,6 +896,28 @@ def tool_memory_add(agent_id: str, content: str, category: str, scope: str = "gl
     mid = cur.lastrowid
     db.commit()  # ensure the INSERT (and FTS trigger) is committed
 
+    procedure_id = None
+    indexed_content = content
+    indexed_category = category
+    indexed_tags = tags_json or ""
+    if memory_type == "procedural":
+        try:
+            from agentmemory import procedural as _procedural
+
+            proc = _procedural.ensure_procedure_for_memory(db, memory_id=mid, agent_id=agent_id)
+            procedure_id = proc.get("id")
+            db.commit()
+            indexed_row = db.execute(
+                "SELECT content, category, tags FROM memories WHERE id = ?",
+                (mid,),
+            ).fetchone()
+            if indexed_row:
+                indexed_content = indexed_row["content"]
+                indexed_category = indexed_row["category"]
+                indexed_tags = indexed_row["tags"] or ""
+        except Exception:
+            pass
+
     # Workaround: FTS5 content-external tables may not build the inverted index
     # from trigger INSERTs on some SQLite versions. Force a re-index for this memory.
     if do_index:
@@ -768,11 +925,11 @@ def tool_memory_add(agent_id: str, content: str, category: str, scope: str = "gl
             db.execute(
                 "INSERT INTO memories_fts(memories_fts, rowid, content, category, tags) "
                 "VALUES('delete', ?, ?, ?, ?)",
-                (mid, content, category, tags_json or ''))
+                (mid, indexed_content, indexed_category, indexed_tags))
             db.execute(
                 "INSERT INTO memories_fts(rowid, content, category, tags) "
                 "VALUES (?, ?, ?, ?)",
-                (mid, content, category, tags_json or ''))
+                (mid, indexed_content, indexed_category, indexed_tags))
             db.commit()
         except Exception:
             pass  # non-fatal
@@ -813,7 +970,7 @@ def tool_memory_add(agent_id: str, content: str, category: str, scope: str = "gl
     if do_index:
         try:
             if not blob:
-                blob = _embed_safe(content)
+                blob = _embed_safe(indexed_content)
             if blob:
                 vdb = _get_vec_db()
                 if vdb:
@@ -832,6 +989,8 @@ def tool_memory_add(agent_id: str, content: str, category: str, scope: str = "gl
               "surprise_score": surprise, "surprise_method": surprise_method,
               "source": source, "trust_score": source_trust,
               "memory_type": memory_type}
+    if procedure_id is not None:
+        result["procedure_id"] = procedure_id
     if _schema_resonance_hit:
         result["schema_resonance"] = _schema_resonance
         result["schema_resonance_fast_track"] = True
@@ -867,8 +1026,8 @@ def tool_memory_search(agent_id: str, query: str, category: str = None,
     expansion adjuncts come after). Falls through gracefully if
     sentence-transformers isn't installed.
     """
-    if memory_type and memory_type not in ("episodic", "semantic"):
-        return {"ok": False, "error": "memory_type must be 'episodic' or 'semantic'"}
+    if memory_type and memory_type not in ("episodic", "semantic", "procedural"):
+        return {"ok": False, "error": "memory_type must be 'episodic', 'semantic', or 'procedural'"}
 
     # Cross-agent borrow restricts the SQL to `scope='global'` (line ~846).
     # Combining that with an explicit non-global scope produces an
@@ -2326,7 +2485,7 @@ TOOLS = [
                 "scope": {"type": "string", "description": "Scope: 'global', 'project:<name>', or 'agent:<id>'", "default": "global"},
                 "confidence": {"type": "number", "description": "Confidence 0.0-1.0", "default": 1.0},
                 "tags": {"type": "string", "description": "Comma-separated tags"},
-                "memory_type": {"type": "string", "enum": ["episodic", "semantic"], "default": "episodic"},
+                "memory_type": {"type": "string", "enum": ["episodic", "semantic", "procedural"], "default": "episodic"},
                 "force": {"type": "boolean", "description": "Bypass W(m) worthiness gate", "default": False},
                 "supersedes_id": {"type": "integer", "description": "ID of memory being superseded; triggers PII recency gate"},
                 "source": {
@@ -2353,7 +2512,7 @@ TOOLS = [
                 "category": {"type": "string", "enum": VALID_MEMORY_CATEGORIES},
                 "scope": {"type": "string"},
                 "limit": {"type": "integer", "default": 20, "description": "Max results; capped by agent tier (7 × tier)"},
-                "memory_type": {"type": "string", "enum": ["episodic", "semantic"], "description": "Filter to one CLS store. Unset = both stores, semantic gets 1.1x confidence bonus."},
+                "memory_type": {"type": "string", "enum": ["episodic", "semantic", "procedural"], "description": "Filter to one memory store. Unset searches all supported memory types; semantic gets a mild confidence bonus in memory_search."},
                 "pagerank_boost": {"type": "number", "default": 0.0, "description": "Re-rank by graph centrality (0=FTS-only, 1=equal FTS+PageRank). Requires prior pagerank run. Implements SR retrieval."},
                 "borrow_from": {"type": "string", "description": "Agent ID to borrow from. When set, searches only that agent's scope='global' memories and logs the cross-agent access in access_log."},
                 "multi_pass": {"type": "boolean", "default": False, "description": "SDM-style iterative convergence: use pass-1 results to build a richer pass-2 query; merge and deduplicate both passes (items in both passes ranked first)."},
@@ -3067,13 +3226,115 @@ def _invoke_dispatch_fn(fn, agent_id: str, arguments: dict):
     return fn(agent_id=agent_id, **arguments)
 
 
+# ---------------------------------------------------------------------------
+# Tool allowlist (issue #114)
+# ---------------------------------------------------------------------------
+#
+# Some MCP clients (notably Google's Antigravity IDE) enforce a hard cap on
+# the total number of MCP tools they'll surface across all connected servers
+# — Antigravity's cap is 100, brainctl exposes 201. Without a way to filter
+# the surface, brainctl is entirely unusable in those clients.
+#
+# `BRAINCTL_ALLOWED_TOOLS` is a comma-separated allowlist read at process
+# start. When set, `tools/list` returns only the named tools and `tools/call`
+# rejects everything else. When unset (the default), the full 201-tool
+# surface is exposed unchanged — full backward compatibility for clients
+# without tool caps.
+#
+# Failure mode: unknown tool names in the allowlist are a HARD ERROR at
+# startup, not a silent skip. A typo like `memory-add` (should be
+# `memory_add`) would otherwise create a misconfiguration that's invisible
+# until the agent tries to call the missing tool. The error message lists
+# every unknown name with the closest valid match.
+#
+# Relationship to BRAINCTL_HTTP_ALLOWED_TOOLS in mcp_http.py: the HTTP
+# variant is REQUIRED + must be non-empty (HTTP transport is remote /
+# unattended, security default = no allowlist → no service). Stdio is
+# interactive and trusted (the client process spawns the server) so the
+# stdio allowlist is OPTIONAL and defaults to "expose everything". Same
+# env-var prefix family, different requiredness.
+
+_ALL_TOOL_NAMES: frozenset[str] = frozenset(t.name for t in TOOLS)
+
+# v2 tool-surface consolidation: hide deprecated v1 named tools from
+# list_tools while leaving their DISPATCH entries callable internally.
+# The consolidated dispatchers in mcp_tools_consolidated.py replace them.
+# To roll back: revert this file's filter + delete mcp_tools_consolidated.py.
+try:
+    from agentmemory.mcp_tools_consolidated import (
+        DEPRECATED_TOOL_NAMES as _V2_DEPRECATED,
+    )
+except ImportError:
+    _V2_DEPRECATED = frozenset()
+
+_VISIBLE_TOOL_NAMES: frozenset[str] = _ALL_TOOL_NAMES - _V2_DEPRECATED
+
+
+def _resolve_allowed_tools() -> frozenset[str] | None:
+    """Read BRAINCTL_ALLOWED_TOOLS at startup. Returns None when unset
+    (visible surface exposed). Returns a non-empty frozenset of valid
+    tool names when set. Hard-fails with a clear message on unknown
+    names AND on v1-deprecated names (post-v2 consolidation), so a
+    stale allowlist can't silently shrink the surface to zero.
+    """
+    raw = os.environ.get("BRAINCTL_ALLOWED_TOOLS", "").strip()
+    if not raw:
+        return None
+    requested = frozenset(part.strip() for part in raw.split(",") if part.strip())
+    if not requested:
+        return None
+    unknown = requested - _ALL_TOOL_NAMES
+    deprecated = (requested & _V2_DEPRECATED) - unknown
+    if unknown or deprecated:
+        import difflib
+
+        hints: list[str] = []
+        for name in sorted(unknown):
+            close = difflib.get_close_matches(name, sorted(_VISIBLE_TOOL_NAMES), n=1, cutoff=0.6)
+            if close:
+                hints.append(f"    {name!r} → did you mean {close[0]!r}?")
+            else:
+                hints.append(f"    {name!r} → no close match")
+        for name in sorted(deprecated):
+            hints.append(
+                f"    {name!r} → deprecated in v2 consolidation; call the "
+                f"corresponding dispatcher (see docs/TOOL_MIGRATION_V2.md)"
+            )
+        msg = (
+            f"BRAINCTL_ALLOWED_TOOLS contains tool names that are not in "
+            f"the visible v2 surface ({len(_VISIBLE_TOOL_NAMES)} tools; "
+            f"see `brainctl-mcp --list-tools`).\n" + "\n".join(hints)
+        )
+        raise SystemExit(msg)
+    return requested
+
+
+_ALLOWED_TOOLS: frozenset[str] | None = _resolve_allowed_tools()
+
+
 @app.list_tools()
 async def list_tools() -> list[Tool]:
-    return TOOLS
+    _lifecycle.touch_activity()
+    # v2: filter out deprecated v1 tools (consolidated into the
+    # mcp_tools_consolidated dispatchers). Their underlying callables
+    # stay registered in DISPATCH for internal use.
+    visible = [t for t in TOOLS if t.name in _VISIBLE_TOOL_NAMES]
+    if _ALLOWED_TOOLS is None:
+        return visible
+    return [t for t in visible if t.name in _ALLOWED_TOOLS]
 
 
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+    _lifecycle.touch_activity()
+    if _ALLOWED_TOOLS is not None and name not in _ALLOWED_TOOLS:
+        # Stay consistent with how an unknown-tool call would surface
+        # to the client: raise so the MCP framework returns -32601
+        # method-not-found. We do NOT silently no-op.
+        raise ValueError(
+            f"tool {name!r} is not in BRAINCTL_ALLOWED_TOOLS — "
+            f"either add it to the env var or remove the call"
+        )
     # Inject agent_id from arguments or default
     agent_id = arguments.pop("agent_id", "mcp-client")
 
@@ -3126,6 +3387,28 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     if not fn:
         return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
 
+    # BG Phase 2 shadow consult — records what the basal ganglia subsystem
+    # would have decided for this dispatch. No-op when the tool is not
+    # registered in bg_actions. Never raises, never alters dispatch.
+    try:
+        from agentmemory.bg_shadow import consult_for_dispatch as _bg_shadow_consult
+        _bg_shadow_consult(action_key=name, agent_id=agent_id, arguments=arguments)
+    except Exception as _bg_exc:  # pragma: no cover — defensive
+        logger.debug("bg shadow consult skipped: %s", _bg_exc)
+
+    # Cerebellum Phase 2 forward-prediction. Issues 3 predictions
+    # (success_probability, expected_latency_ms, expected_outcome_class) and
+    # returns a handle the post-dispatch path uses to close the loop.
+    _cb_consult = None
+    try:
+        from agentmemory.cerebellum_shadow import consult_for_dispatch as _cb_shadow_consult
+        _cb_consult = _cb_shadow_consult(
+            action_key=name, agent_id=agent_id, arguments=arguments,
+        )
+    except Exception as _cb_exc:  # pragma: no cover — defensive
+        logger.debug("cerebellum consult skipped: %s", _cb_exc)
+
+    _cb_error = None
     try:
         if name == "stats":
             result = fn()
@@ -3133,6 +3416,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = _invoke_dispatch_fn(fn, agent_id, arguments)
     except Exception as e:
         result = {"error": str(e)}
+        _cb_error = e
+
+    # Close the cerebellum predict→observe loop with measured latency +
+    # success/error. Never blocks; silent on schema missing.
+    try:
+        from agentmemory.cerebellum_shadow import observe_dispatch as _cb_shadow_observe
+        _cb_shadow_observe(_cb_consult, error=_cb_error)
+    except Exception as _cb_exc:  # pragma: no cover
+        logger.debug("cerebellum observe skipped: %s", _cb_exc)
 
     return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
@@ -3250,13 +3542,24 @@ async def main():
     if "--help" in sys.argv or "-h" in sys.argv:
         print(__doc__)
         print("\nFlags:")
-        print("  --list-tools    Print all available tools and exit")
+        print("  --list-tools    Print visible v2 tools (use --all for full v1+v2 surface)")
         print("  --doctor        Diagnose installation and configuration")
         print("  --doctor --json Also output JSON results")
         return
 
     if "--list-tools" in sys.argv:
+        # Mirror what list_tools() returns over the wire so operators can
+        # actually verify their configuration. `--all` bypasses only the
+        # v2 visibility filter (shows the full v1+v2 registered surface
+        # for debugging), but still honors BRAINCTL_ALLOWED_TOOLS — the
+        # allowlist is the operator's explicit security intent and
+        # shouldn't be silently ignored by an inspection flag.
+        show_all = "--all" in sys.argv
         for t in TOOLS:
+            if not show_all and t.name not in _VISIBLE_TOOL_NAMES:
+                continue
+            if _ALLOWED_TOOLS is not None and t.name not in _ALLOWED_TOOLS:
+                continue
             print(f"  {t.name}: {t.description[:80]}")
         return
 
@@ -3264,12 +3567,175 @@ async def main():
         _run_doctor()
         return
 
+    # Lifecycle hardening — only in real stdio mode, never for the
+    # short-lived --list-tools / --doctor / --help flags above. Prevents
+    # zombie brainctl-mcp processes from accumulating when MCP clients
+    # crash or hold idle pipes (see lib/lifecycle.py for full rationale).
+    _lifecycle.install_signal_handlers()
+    _lifecycle.install_watchdog()
+
     async with stdio_server() as (read_stream, write_stream):
         await app.run(read_stream, write_stream, app.create_initialization_options())
 
 
+def _ensure_db_initialized() -> None:
+    """Bootstrap brain.db on startup so first-tool-call never sees an empty schema.
+
+    Background: `brainctl-mcp` is the canonical MCP entry point used by Mantic,
+    Claude Desktop, and other hosts that don't drive the `brainctl` CLI. Those
+    hosts can legitimately point us at a brand-new path (or an empty zero-byte
+    file Mantic touched during sidecar setup), so the first `memory_add` would
+    historically fail with ``no such table: agents``. We mirror the behaviour
+    of ``brainctl init`` + ``brainctl migrate`` here:
+
+      * agents table missing  -> apply init_schema.sql, seed required rows,
+                                  then run pending migrations
+      * agents table present  -> just run pending migrations (idempotent;
+                                  ``migrate.run`` short-circuits with "Already
+                                  up to date" on the fast path)
+
+    Everything logs to stderr — stdout is reserved for MCP JSON-RPC. On
+    failure we exit non-zero rather than serving a broken transport.
+    """
+    # Re-resolve in case BRAINCTL_DB / BRAIN_DB / BRAINCTL_HOME was set after
+    # module import (e.g. by a wrapper script).
+    db_path = get_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=10)
+        try:
+            has_agents_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agents' LIMIT 1"
+            ).fetchone() is not None
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError as exc:
+        print(f"brainctl-mcp: cannot open {db_path}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if not has_agents_table:
+        # Locate init_schema.sql (package-relative for pip/wheel installs,
+        # repo-relative for dev checkouts and the PyInstaller bundle).
+        # Probe order:
+        #   1. PyInstaller bundle extraction (_MEIPASS), where the spec
+        #      copies init_schema.sql under agentmemory/db/.
+        #   2. pip / wheel install — sits next to mcp_server.py.
+        #   3. Dev checkout repo root.
+        #   4. Last-ditch user-home fallback for dev installs that haven't
+        #      been ``pip install -e``'d yet.
+        _meipass = getattr(sys, "_MEIPASS", None)
+        schema_locations = []
+        if _meipass:
+            schema_locations.append(Path(_meipass) / "agentmemory" / "db" / "init_schema.sql")
+        schema_locations.extend([
+            Path(__file__).parent / "db" / "init_schema.sql",
+            Path(__file__).parent.parent.parent / "db" / "init_schema.sql",
+            Path.home() / "agentmemory" / "db" / "init_schema.sql",
+        ])
+        schema_sql = None
+        for loc in schema_locations:
+            if loc.exists():
+                schema_sql = loc.read_text(encoding="utf-8")
+                break
+        if schema_sql is None:
+            print(
+                "brainctl-mcp: init_schema.sql not found in any of "
+                f"{[str(p) for p in schema_locations]}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        print(
+            f"brainctl-mcp: bootstrapping fresh brain.db at {db_path}",
+            file=sys.stderr,
+        )
+        try:
+            conn = sqlite3.connect(str(db_path))
+            try:
+                conn.executescript(schema_sql)
+                # Seed rows triggers + commands depend on. Mirrors cmd_init
+                # in _impl.py — keep these in sync if either side changes.
+                seed_sql = """
+                    INSERT OR IGNORE INTO workspace_config (key, value) VALUES ('enabled', '0');
+                    INSERT OR IGNORE INTO workspace_config (key, value) VALUES ('ignition_threshold', '0.7');
+                    INSERT OR IGNORE INTO workspace_config (key, value) VALUES ('urgent_threshold', '0.9');
+                    INSERT OR IGNORE INTO workspace_config (key, value) VALUES ('governor_max_per_hour', '5');
+                    INSERT OR IGNORE INTO neuromodulation_state (id, org_state, dopamine_signal, arousal_level,
+                        confidence_boost_rate, confidence_decay_rate, retrieval_breadth_multiplier,
+                        focus_level, temporal_lambda, context_window_depth)
+                        VALUES (1, 'normal', 0.0, 0.3, 0.1, 0.02, 1.0, 0.3, 0.03, 50);
+                """
+                try:
+                    conn.executescript(seed_sql)
+                except sqlite3.OperationalError:
+                    # Minimal schema snapshots may legitimately omit one of
+                    # these tables; migrations will catch up.
+                    pass
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:
+            print(
+                f"brainctl-mcp: failed to apply init_schema.sql at {db_path}: {exc}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    # Always run migrations — they're idempotent and the snapshot lags HEAD
+    # by design (regenerating init_schema.sql on every migration release is
+    # a maintainer foot-gun, per the note in cmd_init).
+    try:
+        from agentmemory import migrate as _mig
+        summary = _mig.run(str(db_path), dry_run=False, backup=False)
+    except Exception as exc:
+        print(
+            f"brainctl-mcp: migration runner crashed for {db_path}: {exc}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not summary.get("ok"):
+        print(
+            f"brainctl-mcp: migration failed for {db_path}: "
+            f"{summary.get('errors') or summary}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    applied = summary.get("applied", 0)
+    if applied:
+        print(
+            f"brainctl-mcp: applied {applied} migration(s) to {db_path}",
+            file=sys.stderr,
+        )
+
+    # Heal legacy unscoped memories_fts update triggers (issue #152) on
+    # installs that predate migration 083 or never run migrations.
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=10)
+        try:
+            if _ensure_fts_triggers_scoped(conn):
+                print(
+                    f"brainctl-mcp: rescoped memories_fts update triggers for {db_path}",
+                    file=sys.stderr,
+                )
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        pass
+
+
 def run():
     """Synchronous entry point for pyproject.toml console_scripts."""
+    # Skip schema bootstrap for inspection-only flags. Migrating on
+    # ``--help`` / ``--list-tools`` / ``--doctor`` would silently mutate the
+    # user's brain.db (e.g. applying pending migrations) every time an
+    # operator inspects the binary, which is a footgun. ``--doctor`` in
+    # particular is supposed to *diagnose* the DB state, not change it.
+    inspection_flags = {"--help", "-h", "--list-tools", "--doctor"}
+    if not (set(sys.argv) & inspection_flags):
+        _ensure_db_initialized()
     import asyncio
     asyncio.run(main())
 

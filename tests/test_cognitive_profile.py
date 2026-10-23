@@ -1,4 +1,4 @@
-"""Unit tests for the cognitive_profile feature (migration 052).
+"""Unit tests for the cognitive_profile feature (migration 086).
 
 Covers:
   * Profile resolution: missing column, missing agent, unknown profile name
@@ -8,7 +8,7 @@ Covers:
     the caller did not override the legacy 0.05 threshold).
   * compute_credibility honors profile priors (Jeffreys vs uniform).
   * set_agent_profile raises on unknown profile names.
-  * Migration 052 is idempotent on a small synthetic DB.
+  * Migration 086 is idempotent on a small synthetic DB.
 """
 from __future__ import annotations
 
@@ -112,7 +112,7 @@ class TestProfileResolution:
         assert get_agent_profile_name(db, "ghost") == "neurotypical"
 
     def test_missing_column_returns_neurotypical(self):
-        # Pre-052 schema without cognitive_profile column. Should not raise.
+        # Pre-086 schema without cognitive_profile column. Should not raise.
         db = _legacy_agents_db()
         assert get_agent_profile_name(db, "agent-x") == "neurotypical"
 
@@ -165,7 +165,7 @@ class TestGateRetuning:
 
     def test_default_score_unchanged_without_profile(self):
         # No profile → must match the historic constants exactly. This is
-        # the regression guard for migration 052.
+        # the regression guard for migration 086.
         score, reason, comp = self._score(profile=None)
         # novelty=1.0 (no neighbors), category=lesson (0.85), scope=agent (1.0),
         # recall_rate fallback=0.50.
@@ -314,12 +314,12 @@ class TestProfileInvariants:
 # Migration idempotency (lightweight)
 # ---------------------------------------------------------------------------
 
-class TestMigration052:
+class TestMigration086:
     def test_runs_on_minimal_schema(self):
-        """Apply 052 to a small synthetic DB and verify the columns land."""
+        """Apply 086 to a small synthetic DB and verify the columns land."""
         db = sqlite3.connect(":memory:")
         db.row_factory = sqlite3.Row
-        # Minimal pre-052 subset of the columns the migration touches.
+        # Minimal pre-086 subset of the columns the migration touches.
         db.execute("CREATE TABLE schema_version (version INTEGER, applied_at TEXT, description TEXT)")
         db.execute("CREATE TABLE agents (id TEXT PRIMARY KEY, display_name TEXT)")
         db.execute(
@@ -334,7 +334,7 @@ class TestMigration052:
         )
         db.commit()
 
-        migration_path = Path(__file__).resolve().parent.parent / "db" / "migrations" / "052_cognitive_profile.sql"
+        migration_path = Path(__file__).resolve().parent.parent / "db" / "migrations" / "086_cognitive_profile.sql"
         sql = migration_path.read_text()
         db.executescript(sql)
         db.commit()

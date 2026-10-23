@@ -32,7 +32,10 @@ Design decisions locked in 2.5.0:
 Boot contract (exits 1 on violation):
 
 * ``BRAINCTL_HTTP_TOKEN`` — required, ≥32 chars.
-* ``BRAINCTL_HTTP_ALLOWED_TOOLS`` — required, comma-separated list.
+* ``BRAINCTL_HTTP_ALLOWED_TOOLS`` — optional. When unset, defaults to the
+  full visible v2 surface (100 tools as of 2.8.0). When set, must be a
+  comma-separated list of names within the visible surface; v1-deprecated
+  names hard-fail at boot with a migration hint.
 * ``BRAINCTL_HTTP_PORT`` — optional, default 8080.
 * ``BRAINCTL_HTTP_HOST`` — optional, default 0.0.0.0.
 * ``BRAINCTL_HTTP_LOG_LEVEL`` — optional, default info.
@@ -109,15 +112,52 @@ class HTTPConfig:
             )
         raw_allowed = os.environ.get("BRAINCTL_HTTP_ALLOWED_TOOLS", "").strip()
         if not raw_allowed:
-            raise ValueError(
-                "BRAINCTL_HTTP_ALLOWED_TOOLS must be set to a non-empty "
-                "comma-separated list of MCP tool names"
+            # Default to the full visible v2 surface. Pre-2.8.1 this was a
+            # boot error; the relaxation lets operators run `BRAINCTL_HTTP_TOKEN=...
+            # brainctl-mcp-http` and get the 100-tool surface without having
+            # to enumerate names. Per-request `allowed_tools` (xAI Grok,
+            # any client) still narrows on top of this server-side default.
+            from agentmemory.mcp_server import _VISIBLE_TOOL_NAMES
+            allowed_tools = frozenset(_VISIBLE_TOOL_NAMES)
+        else:
+            from agentmemory.mcp_server import (
+                _ALL_TOOL_NAMES,
+                _VISIBLE_TOOL_NAMES,
+                _V2_DEPRECATED,
             )
-        allowed_tools = frozenset(
-            part.strip() for part in raw_allowed.split(",") if part.strip()
-        )
-        if not allowed_tools:
-            raise ValueError("BRAINCTL_HTTP_ALLOWED_TOOLS contained only empty entries")
+            requested = frozenset(
+                part.strip() for part in raw_allowed.split(",") if part.strip()
+            )
+            if not requested:
+                raise ValueError(
+                    "BRAINCTL_HTTP_ALLOWED_TOOLS contained only empty entries"
+                )
+            unknown = requested - _ALL_TOOL_NAMES
+            deprecated = (requested & _V2_DEPRECATED) - unknown
+            if unknown or deprecated:
+                import difflib
+
+                hints: list[str] = []
+                for name in sorted(unknown):
+                    close = difflib.get_close_matches(
+                        name, sorted(_VISIBLE_TOOL_NAMES), n=1, cutoff=0.6
+                    )
+                    if close:
+                        hints.append(f"    {name!r} → did you mean {close[0]!r}?")
+                    else:
+                        hints.append(f"    {name!r} → no close match")
+                for name in sorted(deprecated):
+                    hints.append(
+                        f"    {name!r} → deprecated in v2 consolidation; "
+                        f"call the corresponding dispatcher (see "
+                        f"docs/TOOL_MIGRATION_V2.md)"
+                    )
+                raise ValueError(
+                    f"BRAINCTL_HTTP_ALLOWED_TOOLS contains tool names not in "
+                    f"the visible v2 surface ({len(_VISIBLE_TOOL_NAMES)} tools).\n"
+                    + "\n".join(hints)
+                )
+            allowed_tools = requested
         try:
             port = int(os.environ.get("BRAINCTL_HTTP_PORT", "8080"))
         except (TypeError, ValueError) as exc:
