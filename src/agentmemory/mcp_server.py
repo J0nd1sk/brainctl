@@ -331,6 +331,28 @@ def _ensure_fts_index_consistent(conn) -> bool:
     if not active:
         return False
 
+    # Cold-start / under-populated case (issue #151): an external-content
+    # FTS5 index that was never seeded is *empty*, not *corrupt*, so
+    # 'integrity-check' below passes and the rows stay unfindable. The
+    # ``memories_fts_docsize`` shadow table holds one row per indexed
+    # document; when it lags the active-indexed count, the inverted index
+    # is missing documents and must be rebuilt.
+    try:
+        indexed_docs = conn.execute(
+            "SELECT count(*) FROM memories_fts_docsize"
+        ).fetchone()[0]
+    except sqlite3.Error:
+        indexed_docs = None
+    if indexed_docs is not None and indexed_docs < active:
+        try:
+            conn.execute(
+                "INSERT INTO memories_fts(memories_fts) VALUES('rebuild')"
+            )
+            conn.commit()
+            return True
+        except sqlite3.Error:
+            return False
+
     try:
         conn.execute(
             "INSERT INTO memories_fts(memories_fts) VALUES('integrity-check')"
@@ -346,8 +368,51 @@ def _ensure_fts_index_consistent(conn) -> bool:
             return False
     except sqlite3.Error:
         return False
-
     return False
+
+
+_SCOPED_FTS_UPDATE_TRIGGERS = """
+DROP TRIGGER IF EXISTS memories_fts_update_delete;
+DROP TRIGGER IF EXISTS memories_fts_update_insert;
+CREATE TRIGGER memories_fts_update_insert AFTER UPDATE OF content, category, tags, indexed, retired_at ON memories WHEN new.indexed = 1 AND new.retired_at IS NULL BEGIN
+    INSERT INTO memories_fts(rowid, content, category, tags)
+    VALUES (new.id, new.content, new.category, new.tags);
+END;
+CREATE TRIGGER memories_fts_update_delete AFTER UPDATE OF content, category, tags, indexed, retired_at ON memories WHEN old.indexed = 1 BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content, category, tags)
+    VALUES ('delete', old.id, old.content, old.category, old.tags);
+END;
+"""
+
+
+def _ensure_fts_triggers_scoped(conn) -> bool:
+    """Replace legacy unscoped or mis-ordered memories_fts update triggers
+    (issue #152). SQLite fires same-event triggers newest-first, so the
+    insert leg must be created before the delete leg. Idempotent; returns
+    True only if it rewrote them."""
+    try:
+        rows = conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='trigger' "
+            "AND name IN ('memories_fts_update_delete', 'memories_fts_update_insert') "
+            "ORDER BY rowid"
+        ).fetchall()
+    except sqlite3.Error:
+        return False
+    if not rows:
+        return False
+    scoped = all(r[1] and "AFTER UPDATE OF" in r[1].upper() for r in rows)
+    ordered = [r[0] for r in rows] == [
+        "memories_fts_update_insert", "memories_fts_update_delete"
+    ]
+    if scoped and ordered:
+        return False
+    try:
+        conn.executescript(_SCOPED_FTS_UPDATE_TRIGGERS)
+        conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
+        conn.commit()
+        return True
+    except sqlite3.Error:
+        return False
 
 
 def ensure_agent(conn, agent_id: str) -> None:
@@ -3639,6 +3704,21 @@ def _ensure_db_initialized() -> None:
             f"brainctl-mcp: applied {applied} migration(s) to {db_path}",
             file=sys.stderr,
         )
+
+    # Heal legacy unscoped memories_fts update triggers (issue #152) on
+    # installs that predate migration 083 or never run migrations.
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=10)
+        try:
+            if _ensure_fts_triggers_scoped(conn):
+                print(
+                    f"brainctl-mcp: rescoped memories_fts update triggers for {db_path}",
+                    file=sys.stderr,
+                )
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        pass
 
 
 def run():

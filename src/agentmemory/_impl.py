@@ -8090,10 +8090,18 @@ def cmd_vsearch(args):
 
     def _vsearch_table(vec_table, src_table, text_col, extra_cols, fts_table):
         fetch_n = limit * 3
-        vec_rows = db.execute(
-            f"SELECT rowid, distance FROM {vec_table} WHERE embedding MATCH ? AND k=?",
-            (q_blob, fetch_n),
-        ).fetchall()
+        try:
+            vec_rows = db.execute(
+                f"SELECT rowid, distance FROM {vec_table} WHERE embedding MATCH ? AND k=?",
+                (q_blob, fetch_n),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # The vec table for this source doesn't exist (issue #161). Only
+            # vec_memories is created/populated today; vec_events / vec_context
+            # are in the default table set but never built. Skip the missing
+            # source and let vsearch still return results from the tables that
+            # do exist, instead of aborting the whole command.
+            return []
         if not vec_rows:
             return []
 
@@ -9720,6 +9728,15 @@ def cmd_init(args):
         tables = [r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
         ).fetchall()]
+        # Seed the external-content FTS5 inverted index (issue #151). A fresh
+        # memories_fts starts empty; without this rebuild the index is never
+        # primed, and subsequent adds + searches on the CLI path return
+        # nothing until a manual rebuild.
+        try:
+            conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
+            conn.commit()
+        except sqlite3.Error:
+            pass  # memories_fts may be absent in a minimal/partial schema
         conn.close()
 
         json_out({
