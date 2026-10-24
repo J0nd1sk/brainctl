@@ -214,9 +214,9 @@ subsystem_emit(name="lc", action="fire", payload={
 
 | Tool | Replaces | Actions |
 |---|---|---|
-| `entity_admin` | 9 entity_* admin tools (alias/merge/compile/etc.) | add_alias, alias, aliases, compile, cross_agent_view, duplicates_scan, merge, reconcile_report, tier |
+| `entity_admin` | 9 entity_* admin tools (alias/merge/compile/etc.) + special-interest tagging | add_alias, alias, aliases, compile, cross_agent_view, duplicates_scan, merge, reconcile_report, tier, interest_add, interest_list |
 | `memory_admin` | 13 memory_* admin tools | calibration, attention_snapshot, replay_boost, replay_queue, hot, cold, promote, tier_stats, trust_propagate, utility_rate, suggest_category, pii, pii_scan |
-| `agent_admin` | 4 agent_* admin tools | activity, list, model, ping |
+| `agent_admin` | 4 agent_* admin tools + cognitive profiles / sensory affect | activity, list, model, ping, cognition_list, cognition_show, cognition_set, affect_log_sensory |
 | `handoff_admin` | 3 handoff_* admin tools (consume/expire/pin) | consume, expire, pin |
 | `trigger_admin` | 3 trigger_* admin tools (delete/list/update) | delete, list, update |
 | `procedure_admin` | 4 procedure_* admin tools (backfill/stats/update/feedback) | backfill, stats, update, feedback |

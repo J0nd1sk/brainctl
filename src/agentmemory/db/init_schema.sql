@@ -30,7 +30,11 @@ CREATE TABLE agents (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     attention_class TEXT NOT NULL DEFAULT 'ic',
-    attention_budget_tier INTEGER NOT NULL DEFAULT 1
+    attention_budget_tier INTEGER NOT NULL DEFAULT 1,
+    -- Migration 086: per-agent cognitive profile ('neurotypical' default | 'autistic').
+    -- Retunes W(m) gate, AGM threshold, Bayesian recall priors, retrieval rerank.
+    -- See docs/AUTISTIC_BRAIN.md.
+    cognitive_profile TEXT NOT NULL DEFAULT 'neurotypical'
 );
 
 CREATE TABLE memories (
@@ -1537,7 +1541,14 @@ CREATE TABLE entities (
     enrichment_tier INTEGER NOT NULL DEFAULT 3,
     last_enriched_at TEXT,
     -- Migration 035: aliases JSON list for canonical-name dedup
-    aliases TEXT
+    aliases TEXT,
+    -- Migration 086: contradiction preservation (WCC) + special-interest tagging (monotropism).
+    -- See docs/AUTISTIC_BRAIN.md.
+    compiled_truth_variants TEXT,                  -- JSON array; populated only when
+                                                   -- profile.preserve_contradictions = True
+    contradiction_count INTEGER NOT NULL DEFAULT 0,
+    special_interest INTEGER NOT NULL DEFAULT 0,   -- 0/1 — first-class monotropism flag
+    interest_strength REAL NOT NULL DEFAULT 0.0    -- 0.0-1.0 — depth of focus
 );
 
 CREATE UNIQUE INDEX uq_entities_name_scope ON entities(name, scope) WHERE retired_at IS NULL;
@@ -1685,7 +1696,12 @@ CREATE TABLE affect_log (
     trigger TEXT,
     source TEXT DEFAULT 'observation',
     metadata TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    -- Migration 086: enhanced perceptual functioning (EPF) — composite sensory load
+    -- + per-channel JSON. NULL on rows written before / outside the autistic
+    -- profile. See docs/AUTISTIC_BRAIN.md.
+    sensory_load REAL,
+    sensory_dimensions TEXT
 );
 
 CREATE INDEX idx_affect_agent_time ON affect_log(agent_id, created_at DESC);
@@ -4051,3 +4067,16 @@ CREATE TABLE IF NOT EXISTS olfactory_imprints (
 CREATE INDEX IF NOT EXISTS idx_oi_recent ON olfactory_imprints(imprinted_at);
 CREATE INDEX IF NOT EXISTS idx_oi_content ON olfactory_imprints(content_hash);
 CREATE INDEX IF NOT EXISTS idx_oi_valence ON olfactory_imprints(valence);
+
+-- Migration 086: cognitive_profile + special-interest + sensory affect indexes.
+-- The columns themselves are added inline above (agents, entities, affect_log);
+-- the indexes mirror those in db/migrations/086_cognitive_profile.sql so fresh
+-- installs match the upgrade path (enforced by tests/test_schema_parity.py).
+CREATE INDEX IF NOT EXISTS idx_agents_cognitive_profile
+    ON agents(cognitive_profile);
+CREATE INDEX IF NOT EXISTS idx_entities_special_interest
+    ON entities(special_interest, interest_strength DESC)
+    WHERE special_interest = 1;
+CREATE INDEX IF NOT EXISTS idx_affect_sensory_load
+    ON affect_log(agent_id, sensory_load DESC)
+    WHERE sensory_load IS NOT NULL;

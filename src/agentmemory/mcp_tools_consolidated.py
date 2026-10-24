@@ -127,6 +127,8 @@ def _collect_dispatch() -> dict[str, Any]:
         "mcp_tools_reconcile", "mcp_tools_scheduler", "mcp_tools_telemetry",
         "mcp_tools_temporal", "mcp_tools_temporal_abstraction",
         "mcp_tools_usage", "mcp_tools_workspace", "mcp_tools_world",
+        # Migration 086 cognitive profiles (agent_admin / entity_admin)
+        "mcp_tools_cognitive",
     ):
         try:
             mod = importlib.import_module(f"agentmemory.{mod_name}")
@@ -469,6 +471,9 @@ _TOPIC_ROUTES: dict[str, dict[str, str]] = {
         "merge":                "entity_merge",
         "reconcile_report":     "entity_reconcile_report",
         "tier":                 "entity_tier",
+        # Migration 086 — special-interest tagging (monotropism).
+        "interest_add":         "interest_add",
+        "interest_list":        "interest_list",
     },
     "memory_admin": {
         "calibration":         "memory_calibration",
@@ -490,6 +495,11 @@ _TOPIC_ROUTES: dict[str, dict[str, str]] = {
         "list":      "agent_list",
         "model":     "agent_model",
         "ping":      "agent_ping",
+        # Migration 086 — per-agent cognitive profiles + sensory affect.
+        "cognition_list":     "cognition_list",
+        "cognition_show":     "cognition_show",
+        "cognition_set":      "cognition_set",
+        "affect_log_sensory": "affect_log_sensory",
     },
     "handoff_admin": {
         "consume": "handoff_consume",
@@ -961,7 +971,7 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         name="entity_admin",
-        description="Entity catalog admin ops. action ∈ {add_alias, alias, aliases, compile, cross_agent_view, duplicates_scan, merge, reconcile_report, tier}. Primary entity tools (entity_create/get/search/observe/relate) stay direct.",
+        description="Entity catalog admin ops. action ∈ {add_alias, alias, aliases, compile, cross_agent_view, duplicates_scan, merge, reconcile_report, tier, interest_add, interest_list}. interest_add payload={entity, strength}; interest_list payload={scope?, limit?}. Primary entity tools (entity_create/get/search/observe/relate) stay direct.",
         inputSchema={"type": "object", "properties": {"action": {"type": "string"}, "payload": _OBJ}, "required": ["action"]},
     ),
     Tool(
@@ -971,7 +981,7 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         name="agent_admin",
-        description="Agent admin ops. action ∈ {activity, list, model, ping}. Primary agent tools (agent_orient, agent_wrap_up, agent_register) stay direct.",
+        description="Agent admin ops. action ∈ {activity, list, model, ping, cognition_list, cognition_show, cognition_set, affect_log_sensory}. cognition_show payload={name}; cognition_set payload={agent_id, profile}; affect_log_sensory payload={agent_id, sensory_dimensions, valence?, arousal?, dominance?, affect_label?, trigger?}. Primary agent tools (agent_orient, agent_wrap_up, agent_register) stay direct.",
         inputSchema={"type": "object", "properties": {"action": {"type": "string"}, "payload": _OBJ}, "required": ["action"]},
     ),
     Tool(
@@ -1137,6 +1147,10 @@ DEPRECATED_TOOL_NAMES: frozenset[str] = frozenset({
     "trigger_delete", "trigger_list", "trigger_update",
     "procedure_backfill", "procedure_stats", "procedure_update",
     "procedure_feedback",
+    # Migration 086 cognitive-profile tools (routed via agent_admin /
+    # entity_admin; never exposed as top-level v1 names).
+    "cognition_list", "cognition_show", "cognition_set", "affect_log_sensory",
+    "interest_add", "interest_list",
 })
 
 

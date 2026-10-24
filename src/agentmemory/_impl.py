@@ -3055,6 +3055,8 @@ def cmd_memory_add(args):
             db_vec_gate = _try_get_db_with_vec()
             if db_vec_gate:
                 try:
+                    from agentmemory.cognitive_profile import get_agent_profile as _get_profile
+                    _cog_profile = _get_profile(db, args.agent)
                     worthiness_score, worthiness_reason, worthiness_components = _wd.gate_write(
                         candidate_blob=blob,
                         confidence=effective_confidence,
@@ -3066,6 +3068,7 @@ def cmd_memory_add(args):
                         arousal_gain=_arousal_boost,
                         db_stats=db,
                         agent_id=args.agent,
+                        profile=_cog_profile,
                     )
                 finally:
                     db_vec_gate.close()
@@ -3495,6 +3498,31 @@ def cmd_memory_search(args):
             imp = r.get("importance") or 0.5
             r["epistemic_score"] = round((1.0 - conf) * imp, 4)
         results.sort(key=lambda r: -r.get("epistemic_score", 0.0))
+
+    # Monotropic focus boost — cognitive_profile = autistic + --focus.
+    # No-op when the agent's profile has monotropic_focus_boost == 1.0
+    # (the neurotypical default), so this costs essentially nothing for
+    # agents that aren't using the autistic profile.
+    _focus = getattr(args, "focus", None)
+    if _focus and results:
+        try:
+            from agentmemory.cognitive_profile import get_agent_profile as _get_cp
+            _cp = _get_cp(db, args.agent)
+            _boost = float(_cp.get("monotropic_focus_boost", 1.0))
+        except Exception:
+            _boost = 1.0
+        if _boost > 1.0:
+            _focus_l = _focus.lower()
+            _hit = False
+            for r in results:
+                content = (r.get("content") or "").lower()
+                scope_v = (r.get("scope") or "").lower()
+                if _focus_l in content or _focus_l == scope_v:
+                    r["final_score"] = (r.get("final_score") or 0.0) * _boost
+                    r["monotropic_boost"] = round(_boost, 3)
+                    _hit = True
+            if _hit:
+                results.sort(key=lambda r: -(r.get("final_score") or 0.0))
 
     # Update recall stats for memories the caller actually sees.
     # Uses retrieval-practice strengthening: hard retrievals boost more than easy ones.
@@ -12802,12 +12830,36 @@ def cmd_collapse_stats(args):
 
 def cmd_resolve_conflict(args):
     """AGM credibility-weighted resolution of open belief conflicts."""
+    # Prefer the in-package implementation (which is profile-aware as of
+    # migration 086); fall back to the legacy ~/bin/lib override for
+    # back-compat with users who maintain a customized belief_revision.py
+    # there.
     try:
-        sys.path.insert(0, str(Path.home() / "bin" / "lib"))
-        from belief_revision import resolve_conflict, list_conflicts, auto_resolve
-    except ImportError as e:
-        print(f"ERROR: Cannot import belief_revision: {e}", file=sys.stderr)
-        sys.exit(1)
+        from agentmemory.lib.belief_revision import (
+            resolve_conflict, list_conflicts, auto_resolve,
+        )
+    except ImportError:
+        try:
+            sys.path.insert(0, str(Path.home() / "bin" / "lib"))
+            from belief_revision import resolve_conflict, list_conflicts, auto_resolve
+        except ImportError as e:
+            print(f"ERROR: Cannot import belief_revision: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    # Resolve agent profile so AGM threshold + Bayesian priors retune
+    # per the agent's cognitive_profile (autistic = wider threshold,
+    # Jeffreys priors).
+    try:
+        from agentmemory.cognitive_profile import get_agent_profile as _get_profile
+        _profile_db = get_db()
+        _agent_for_profile = (
+            getattr(args, "agent", None)
+            or os.environ.get("BRAINCTL_AGENT_ID")
+            or "brainctl"
+        )
+        _cog_profile = _get_profile(_profile_db, _agent_for_profile)
+    except Exception:
+        _cog_profile = None
 
     db_path = str(DB_PATH)
     use_json = getattr(args, "json", False)
@@ -12834,7 +12886,15 @@ def cmd_resolve_conflict(args):
     if getattr(args, "auto", False):
         threshold = getattr(args, "threshold", 0.05) or 0.05
         dry_run   = getattr(args, "dry_run", False)
-        results   = auto_resolve(db_path=db_path, threshold=threshold, dry_run=dry_run)
+        # Pass profile only if the underlying impl supports it (legacy
+        # override may not).
+        try:
+            results = auto_resolve(
+                db_path=db_path, threshold=threshold,
+                dry_run=dry_run, profile=_cog_profile,
+            )
+        except TypeError:
+            results = auto_resolve(db_path=db_path, threshold=threshold, dry_run=dry_run)
         if use_json:
             json_out(results)
             return
@@ -12878,13 +12938,23 @@ def cmd_resolve_conflict(args):
     force_winner  = getattr(args, "force_winner", None)
     threshold     = getattr(args, "threshold", 0.05) or 0.05
 
-    result = resolve_conflict(
-        conflict_id=conflict_id,
-        db_path=db_path,
-        dry_run=dry_run,
-        force_winner_id=force_winner,
-        threshold=threshold,
-    )
+    try:
+        result = resolve_conflict(
+            conflict_id=conflict_id,
+            db_path=db_path,
+            dry_run=dry_run,
+            force_winner_id=force_winner,
+            threshold=threshold,
+            profile=_cog_profile,
+        )
+    except TypeError:
+        result = resolve_conflict(
+            conflict_id=conflict_id,
+            db_path=db_path,
+            dry_run=dry_run,
+            force_winner_id=force_winner,
+            threshold=threshold,
+        )
 
     if use_json:
         json_out(result)
@@ -16519,6 +16589,10 @@ def build_parser():
                              help="Boost memories anchored to this file path (substring match)")
     mem_search.add_argument("--profile",
                              help="Task-scoped preset: writing, meeting, research, ops, networking, review")
+    mem_search.add_argument("--focus",
+                             help="Monotropic focus: boost results matching this entity name "
+                                  "or scope (only applies when the agent's cognitive_profile "
+                                  "has monotropic_focus_boost > 1.0; see `brainctl cognition show`)")
 
     mem_list = mem_sub.add_parser("list", help="List memories")
     mem_list.add_argument("--category", "-c")
@@ -17974,6 +18048,10 @@ def build_parser():
     from agentmemory.commands.ingest import register_parser as _ingest_register
     _ingest_register(sub)
 
+    # --- cognition / interest (cognitive profiles + monotropism tagging) ---
+    from agentmemory.commands.cognition import register_parser as _cog_register
+    _cog_register(sub)
+
     # --- marketplace api client (2.5.x feat/cnft-mint) ---
     # Wraps the REST API at brainctl.org/api/marketplace. Wallet-sig
     # auth, browse, list, offer, counter, accept/reject/withdraw,
@@ -19138,11 +19216,15 @@ def main():
         from agentmemory.commands.ingest import cmd_ingest as _cmd_ingest
         _cmd_ingest(args)
         return
-    elif args.command == "ingest":
-        # Code-ingest subcommand suite (2.4.4+, optional [code] extra).
-        # Dispatch lives in commands/ingest.py.
-        from agentmemory.commands.ingest import cmd_ingest as _cmd_ingest
-        _cmd_ingest(args)
+    elif args.command == "cognition":
+        # Cognitive-profile subcommand suite (migration 086).
+        from agentmemory.commands.cognition import cmd_cognition as _cmd_cog
+        _cmd_cog(args)
+        return
+    elif args.command == "interest":
+        # Special-interest tagging suite (migration 086, monotropism).
+        from agentmemory.commands.cognition import cmd_interest as _cmd_intr
+        _cmd_intr(args)
         return
     else:
         fn = dispatch.get(args.command)
