@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from agentmemory.lib.mcp_helpers import days_since as _days_since
+from agentmemory.lib import pattern_separation as _pattern_sep
 from agentmemory.lib.validity import (
     close_superseded as _close_superseded,
     superseded_among as _superseded_among,
@@ -2949,6 +2950,33 @@ def cmd_memory_add(args):
     surprise = None
     surprise_method = None
     blob = _embed_query_safe(args.content)  # reused for vec_memories insert below
+
+    # ── DG pattern separation / CA3 pattern completion ─────────────────
+    # Three-way write decision against near neighbours in the same agent /
+    # scope / category (shared with the MCP memory_add path; see
+    # agentmemory.lib.pattern_separation). Near-identical with no key-token
+    # difference → reinforce the existing memory, no insert. Similar but a
+    # number / date / negation / entity differs → write it and link
+    # distinct_from. Skipped for --force and for explicit --supersedes.
+    supersedes_id = getattr(args, "supersedes", None)
+    dg_decision = _pattern_sep.Decision(_pattern_sep.NOVEL)
+    if not force_write and not supersedes_id and args.agent:
+        dg_decision = _pattern_sep.evaluate(
+            db, args.content, args.agent, args.scope or "global", args.category,
+            blob=blob, get_vec_db=_try_get_db_with_vec if blob else None,
+        )
+    if dg_decision.action == _pattern_sep.REINFORCE and not dry_run_worthiness:
+        try:
+            json_out(_pattern_sep.apply_reinforce(
+                db, dg_decision, args.agent, args.scope or "global", _now_ts()))
+            return
+        except Exception as exc:
+            logger.debug("DG reinforce failed (non-fatal): %s", exc)
+    # A key-token difference is positive evidence of a distinct fact, so the
+    # similarity-driven rejections below (A-MAC low novelty, W(m)
+    # near-duplicate) must not fold it back into its neighbour.
+    dg_separated = dg_decision.action == _pattern_sep.SEPARATE
+
     try:
         surprise, surprise_method = _surprise_score(db, args.content, blob=blob)
     except Exception:
@@ -2981,7 +3009,7 @@ def cmd_memory_add(args):
         temporal_recency=1.0,
         content_type_prior=_content_type_prior,
     )
-    if _pre_worthiness < 0.3 and not force_write:
+    if _pre_worthiness < 0.3 and not force_write and not dg_separated:
         # Log rejected memory as observation event
         try:
             db.execute(
@@ -3059,12 +3087,14 @@ def cmd_memory_add(args):
             "worthiness_score": worthiness_score,
             "rejection_reason": worthiness_reason,
             "components": worthiness_components,
-            "would_write": (worthiness_reason == ""),
+            "would_write": (worthiness_reason == "" or dg_separated)
+                           and dg_decision.action != _pattern_sep.REINFORCE,
+            "pattern_separation": dg_decision.summary(),
         })
         return
 
     # Gate rejection: exit with structured output, no INSERT
-    if worthiness_reason and not force_write:
+    if worthiness_reason and not force_write and not dg_separated:
         # Log the rejection as an event for monitoring
         try:
             db.execute(
@@ -3097,7 +3127,6 @@ def cmd_memory_add(args):
 
     # PII recency gate — applied when --supersedes <id> is specified
     # Computes entrenchment of the incumbent and raises alpha_floor on the new memory.
-    supersedes_id = getattr(args, "supersedes", None)
     alpha_floor = 1
     pii_info = {}
     if supersedes_id:
@@ -3109,45 +3138,8 @@ def cmd_memory_add(args):
         }
         alpha_floor = 1 + math.ceil(max(0.0, incumbent_pii - 0.20) * 0.5 * 5)
 
-    # ── Pre-ingest duplicate suppression (TORMENT-inspired) ────────────
-    # Before inserting, check if a very similar memory already exists for
-    # this agent. If so, reinforce it instead of creating a duplicate.
-    # This prevents unbounded growth from repeated similar observations.
-    dedup_hit = None
-    if not force_write and args.agent:
-        try:
-            fts_q = _sanitize_fts_query(args.content)
-            if fts_q:
-                candidates = db.execute(
-                    "SELECT m.id, m.content, m.confidence, m.category, m.recalled_count "
-                    "FROM memories m JOIN memories_fts f ON m.id = f.rowid "
-                    "WHERE memories_fts MATCH ? AND m.agent_id = ? AND m.retired_at IS NULL "
-                    "AND m.category = ? "
-                    "ORDER BY f.rank LIMIT 5",
-                    (fts_q, args.agent, args.category)
-                ).fetchall()
-                for cand in candidates:
-                    sim = _jaccard_word_similarity(args.content, cand["content"])
-                    if sim >= DEDUP_CONTENT_SIMILARITY_THRESHOLD:
-                        # Reinforce existing memory instead of duplicating
-                        new_conf = min(0.98, cand["confidence"] + (1.0 - cand["confidence"]) * 0.3)
-                        db.execute(
-                            "UPDATE memories SET confidence=?, recalled_count=recalled_count+1, "
-                            "last_recalled_at=?, updated_at=? WHERE id=?",
-                            (new_conf, _now_ts(), _now_ts(), cand["id"])
-                        )
-                        db.commit()
-                        dedup_hit = cand["id"]
-                        json_out({
-                            "ok": True,
-                            "deduplicated": True,
-                            "reinforced_memory_id": cand["id"],
-                            "similarity": round(sim, 4),
-                            "new_confidence": round(new_conf, 4),
-                        })
-                        return
-        except Exception as exc:
-            logger.debug("Dedup check failed (non-fatal): %s", exc)
+    # Pre-ingest duplicate suppression now lives in the DG/CA3 gate above
+    # (agentmemory.lib.pattern_separation), shared with the MCP path.
 
     # ── Hard memory cap check (TORMENT-inspired) ─────────────────────
     # If this agent has exceeded the hard cap, force-compress before inserting.
@@ -3256,6 +3248,10 @@ def cmd_memory_add(args):
             db.commit()
         except Exception:
             pass  # non-fatal: FTS trigger may have already handled it
+
+    # DG separation edges + hippocampus_pattern_separations audit row
+    dg_summary = _pattern_sep.after_insert(
+        db, memory_id, dg_decision, args.agent, args.scope or "global", _now_ts())
 
     # Record gated_from_memory_id audit trail if column exists (migration 025)
     if supersedes_id:
@@ -3412,6 +3408,8 @@ def cmd_memory_add(args):
         "conflict_logged": conflict_logged,
         "worthiness_score": worthiness_score,
     }
+    if dg_summary:
+        out["pattern_separation"] = dg_summary
     if procedure_id is not None:
         out["procedure_id"] = procedure_id
     if auto_linked:
@@ -6245,11 +6243,20 @@ def _rrf_fuse(fts_list, vec_list, k=_RRF_K):
     return out
 
 
+# Relations _graph_expand must not follow. ``distinct_from`` (DG pattern
+# separation, agentmemory.lib.pattern_separation) links a memory to a
+# similar-but-different sibling, e.g. the old value of an updated fact;
+# following it would pull the sibling back into results it was separated from.
+_GRAPH_EXPAND_EXCLUDED_RELATIONS = (_pattern_sep.SEPARATION_RELATION,)
+
+
 def _graph_expand(db, top_results, table_hint, already_ids, limit=5):
     """1-hop knowledge_edges expansion from top-``limit`` results.
 
     Returns list of neighbor rows annotated with source="graph" and the
     relation that connected them.  Skips IDs already in ``already_ids``.
+    Edges whose relation is in ``_GRAPH_EXPAND_EXCLUDED_RELATIONS`` are not
+    followed in either direction.
     """
     graph_rows = []
     seen = set(already_ids)
@@ -6261,16 +6268,20 @@ def _graph_expand(db, top_results, table_hint, already_ids, limit=5):
         if node_id is None:
             continue
         # Fetch both outbound and inbound edges for this node
+        _excl = ",".join("?" * len(_GRAPH_EXPAND_EXCLUDED_RELATIONS))
         edges = db.execute(
             "SELECT target_table as nb_table, target_id as nb_id, relation_type, weight "
             "FROM knowledge_edges WHERE source_table=? AND source_id=? "
             "AND target_table IN ('memories','events','context') "
+            f"AND relation_type NOT IN ({_excl}) "
             "UNION ALL "
             "SELECT source_table as nb_table, source_id as nb_id, relation_type, weight "
             "FROM knowledge_edges WHERE target_table=? AND target_id=? "
             "AND source_table IN ('memories','events','context') "
+            f"AND relation_type NOT IN ({_excl}) "
             "ORDER BY weight DESC LIMIT 10",
-            (table_hint, node_id, table_hint, node_id),
+            (table_hint, node_id, *_GRAPH_EXPAND_EXCLUDED_RELATIONS,
+             table_hint, node_id, *_GRAPH_EXPAND_EXCLUDED_RELATIONS),
         ).fetchall()
 
         for edge in edges:

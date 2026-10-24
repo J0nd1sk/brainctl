@@ -17,6 +17,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   all|dedup|temporal|abstention`. Baselines live in
   `tests/bench/baselines/memory_*.json`; gating is opt-in via
   `--check-memory`. The default run and `--check` are unchanged.
+- **DG pattern separation + CA3 pattern completion on writes**
+  (`agentmemory.lib.pattern_separation`): one three-way write decision,
+  shared by `brainctl memory add` and the MCP `memory_add` tool. Near
+  neighbours (same agent / scope / category) are scored by a normalised
+  lexical signature (casefold, punctuation stripped, token-set Jaccard,
+  FTS5 candidates), or by cosine when an embedding exists. Near-identical
+  with no key-token difference → the existing memory is reinforced
+  (confidence, `recalled_count`, `alpha`), no insert. Similar but a key
+  token differs (number, date word, negation, proper noun / known entity)
+  → written as its own memory plus a `distinct_from` knowledge edge.
+  Decisions are logged to `hippocampus_pattern_separations`. Dedup bench:
+  exact + case/punctuation duplicates now 100% suppressed on both paths
+  (MCP was 0%), false merges 0 (was 16.7%, the negation flips).
+
+### Changed
+
+- The CLI's old pre-insert Jaccard dedup (all-words FTS AND match, raw
+  whitespace tokens, any scope) is replaced by the shared gate above. A
+  `--supersedes` / `supersedes_id` write skips the gate, and a
+  key-token-separated write is no longer rejected by the A-MAC / W(m)
+  near-duplicate branches (scores and tier routing are unchanged).
 
 ## [2.8.1] — 2026-10-23 — *hotfix: MCP install crash + search index loss*
 
