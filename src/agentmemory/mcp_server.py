@@ -1043,7 +1043,7 @@ def _familiarity_gate(db, query: str, rows: list, abstain: bool = False):
     """
     try:
         from agentmemory.retrieval.answerability import assess_familiarity
-        fam = assess_familiarity(query, rows, db=db)
+        fam = assess_familiarity(query, rows, db=db, recollection=bool(abstain))
     except Exception:
         return rows, {}
     fields = {"answerable": fam.answerable, "familiarity": fam.score}

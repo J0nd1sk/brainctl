@@ -35,10 +35,14 @@ The signals are averaged with fixed weights (absent signals drop out and the
 weights renormalise), and the average goes through a logistic squash centred
 on ``FAMILIARITY_MIDPOINT``, which makes the score read as P(answerable).
 ``answerable`` is ``familiarity >= ANSWERABLE_THRESHOLD`` (0.25, a cost-
-asymmetric cut: false abstentions are the expensive error). Hits in the uncertain middle band get one recollection pass
-(``_recollect``): the store is re-probed with an expanded query that requires
-the terms the best hit was missing, and the best re-probed memory replaces the
-hit if it covers the question better.
+asymmetric cut: false abstentions are the expensive error).
+
+When the caller is about to act on the verdict (``recollection=True``, which
+the search paths pass only under ``--abstain`` / ``abstain=True``), hits in
+the uncertain middle band get one recollection pass (``_recollect``): the
+store is re-probed with an expanded query that requires the terms the best
+hit was missing, and the best re-probed memory replaces the hit if it covers
+the question better. The annotate-only default skips it to stay cheap.
 
 How the constants were chosen: signal weights, the answer-type rule and the
 threshold by principle (see each constant); only the logistic midpoint and
@@ -89,7 +93,7 @@ SIGNAL_WEIGHTS: Dict[str, float] = {
 #: Centre and slope of the logistic squash over the weighted average, i.e.
 #: the calibration that turns the average into P(answerable). Fit by 1-D
 #: logistic regression on each half of the abstention bench fixtures
-#: separately (even / odd query index): both halves gave a midpoint of 0.64
+#: separately (even / odd query index): both halves gave a midpoint of 0.65
 #: and a slope of 6.5-7.2, rounded here. The other half is the held-out check.
 FAMILIARITY_MIDPOINT = 0.65
 FAMILIARITY_SLOPE = 8.0
@@ -165,11 +169,39 @@ def _stem_texts(texts: Sequence[str]) -> List[List[str]]:
     return [[_porter.term(t) for t in _tokens(text)] for text in texts]
 
 
+def _present_terms(text: str, wanted: set) -> set:
+    """The subset of ``wanted`` index terms that occur in ``text``.
+
+    Memories can be whole chat sessions, so stemming every token is the
+    expensive part of the gate. Porter only rewrites a word's tail: apart
+    from the last two letters of the stem (``-biliti`` -> ``-ble`` is the
+    worst case) a stem is a prefix of every word that produces it. So only
+    unique tokens starting with such a prefix of a wanted term get stemmed.
+    """
+    if not wanted or not text:
+        return set()
+    keys = tuple({w[: max(1, len(w) - 2)] for w in wanted})
+    found = set()
+    for low in set(_TOKEN_RE.findall(text.lower())):
+        if not low.isascii():
+            low = _porter.fold(low)
+        if not low.startswith(keys):
+            continue
+        t = _porter.stem(low)
+        if t in wanted:
+            found.add(t)
+    return found
+
+
 @dataclass
 class _QueryTerms:
     stems: List[str]                      # salient stems, query order, unique
     focus: set = field(default_factory=set)      # answer-type stems
     entities: List[str] = field(default_factory=list)  # stems of named things
+    # stem -> lower-cased surface word. FTS5 MATCH re-stems its input and
+    # Porter is not idempotent ("database" -> "databas" -> "databa"), so
+    # queries against memories_fts must use the surface word, not the stem.
+    surface: Dict[str, str] = field(default_factory=dict)
 
 
 def _is_entity_token(tok: str, position: int) -> bool:
@@ -203,6 +235,7 @@ def salient_terms(query: str) -> _QueryTerms:
         if stem not in seen:
             seen.add(stem)
             out.stems.append(stem)
+            out.surface[stem] = _porter.fold(tok)
             if _is_entity_token(tok, i):
                 out.entities.append(stem)
         if prev_wh:
@@ -231,7 +264,8 @@ def _fts_phrase(stem: str) -> str:
     return '"' + stem.replace('"', '""') + '"'
 
 
-def _corpus_stats(db, stems: Sequence[str]) -> Optional[Tuple[int, Dict[str, int]]]:
+def _corpus_stats(db, stems: Sequence[str],
+                  surface: Optional[Dict[str, str]] = None) -> Optional[Tuple[int, Dict[str, int]]]:
     """(N active memories, {stem: document frequency}) or None."""
     if db is None or not stems:
         return None
@@ -241,13 +275,15 @@ def _corpus_stats(db, stems: Sequence[str]) -> Optional[Tuple[int, Dict[str, int
         ).fetchone()[0])
         if n < MIN_CORPUS_FOR_IDF:
             return None
-        df: Dict[str, int] = {}
-        for s in stems:
-            df[s] = int(db.execute(
-                "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH ?",
-                (_fts_phrase(s),),
-            ).fetchone()[0])
-        return n, df
+        # One statement for every term's document frequency.
+        uniq = list(dict.fromkeys(stems))
+        sub = ", ".join(
+            "(SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH ?)" for _ in uniq
+        )
+        surface = surface or {}
+        counts = db.execute(f"SELECT {sub}",
+                            [_fts_phrase(surface.get(t, t)) for t in uniq]).fetchone()
+        return n, {t: int(c) for t, c in zip(uniq, counts)}
     except Exception:
         return None
 
@@ -262,11 +298,42 @@ def _fts5_idf(n: int, df: int) -> float:
     return max(math.log((n - df + 0.5) / (df + 0.5)), 1e-6)
 
 
-def _raw_bm25(db, stems: Sequence[str], rowids: Sequence[int]) -> Dict[int, float]:
+def _fts_present_terms(db, terms: "_QueryTerms",
+                       rowids: Sequence[int]) -> Optional[Dict[int, set]]:
+    """{rowid: salient stems it contains} from memories_fts, one statement.
+
+    Every rowid in ``rowids`` gets an entry (possibly empty). None on error
+    (the caller then scans the row text instead).
+    """
+    if db is None or not rowids:
+        return None
+    ids = list(dict.fromkeys(int(r) for r in rowids))
+    ph = ",".join("?" * len(ids))
+    parts, params = [], []
+    for i, s in enumerate(terms.stems):
+        parts.append(f"SELECT rowid, {i} FROM memories_fts "
+                     f"WHERE memories_fts MATCH ? AND rowid IN ({ph})")
+        # content + tags, like _row_text (category labels are not evidence)
+        params.append("{content tags} : " + _fts_phrase(terms.surface.get(s, s)))
+        params.extend(ids)
+    out: Dict[int, set] = {i: set() for i in ids}
+    if not parts:
+        return out
+    try:
+        for rid, idx in db.execute(" UNION ALL ".join(parts), params):
+            out.setdefault(int(rid), set()).add(terms.stems[int(idx)])
+    except Exception:
+        return None
+    return out
+
+
+def _raw_bm25(db, stems: Sequence[str], rowids: Sequence[int],
+              surface: Optional[Dict[str, str]] = None) -> Dict[int, float]:
     """FTS5 bm25 (positive, larger = better) of ``rowids`` over ``stems``."""
     if db is None or not stems or not rowids:
         return {}
-    expr = " OR ".join(_fts_phrase(s) for s in stems)
+    surface = surface or {}
+    expr = " OR ".join(_fts_phrase(surface.get(s, s)) for s in stems)
     w = BM25_COLUMN_WEIGHTS
     ph = ",".join("?" * len(rowids))
     try:
@@ -424,14 +491,23 @@ def _score_candidates(
 ) -> Tuple[float, Dict[str, Optional[float]], Optional[Dict[str, Any]], set]:
     """Best (raw, signals, row, stems) over ``rows``."""
     weights = _term_weights(terms, stats)
-    stemmed = _stem_texts([_row_text(r) for r in rows])
+    wanted = set(terms.stems)
     mem_ids = [int(r["id"]) for r in rows if _is_memory_row(r) and r.get("id") is not None]
-    bm25 = _raw_bm25(db, terms.stems, mem_ids) if stats else {}
+    # Memory rows: ask memories_fts which terms each one contains (posting
+    # list lookups, no text scan). Other rows, or no db: scan their text.
+    indexed = _fts_present_terms(db, terms, mem_ids) if stats else None
+    stemmed = []
+    for r in rows:
+        rid = r.get("id")
+        if indexed is not None and rid is not None and _is_memory_row(r) and int(rid) in indexed:
+            stemmed.append(indexed[int(rid)])
+        else:
+            stemmed.append(_present_terms(_row_text(r), wanted))
+    bm25 = _raw_bm25(db, terms.stems, mem_ids, terms.surface) if stats else {}
     ideal = _ideal_bm25(terms, stats) if stats else None
     best: Tuple[float, Dict[str, Optional[float]], Optional[Dict[str, Any]], set] = (-1.0, {}, None, set())
     ranked_bm25 = sorted(bm25.values(), reverse=True)
-    for row, stems in zip(rows, stemmed):
-        stem_set = set(stems)
+    for row, stem_set in zip(rows, stemmed):
         b = bm25.get(int(row["id"])) if row.get("id") is not None and _is_memory_row(row) else None
         others = list(ranked_bm25)
         if b is not None and b in others:
@@ -490,7 +566,7 @@ def assess_familiarity(
     *,
     db=None,
     threshold: float = ANSWERABLE_THRESHOLD,
-    recollection: bool = True,
+    recollection: bool = False,
 ) -> Familiarity:
     """Familiarity of ``query`` against ranked search ``candidates``.
 
@@ -508,7 +584,7 @@ def assess_familiarity(
         # retriever rather than abstain on a technicality.
         return Familiarity(1.0, True, "no_salient_terms", raw=1.0, best_id=rows[0].get("id"))
 
-    stats = _corpus_stats(db, terms.stems)
+    stats = _corpus_stats(db, terms.stems, terms.surface)
     raw, sig, best_row, stem_set = _score_candidates(terms, rows, db, stats)
     score = squash(raw)
     missing = [s for s in terms.stems if s not in stem_set]
@@ -558,6 +634,7 @@ def assess_answerability(
     *,
     db=None,
     threshold: float = ANSWERABLE_THRESHOLD,
+    recollection: bool = False,
 ) -> Dict[str, Any]:
     """``cmd_search`` entry point.
 
@@ -574,7 +651,8 @@ def assess_answerability(
         if name not in _BUCKET_ORDER:
             flat.extend(rows or [])
     flat.sort(key=lambda r: float(r.get("final_score") or 0.0), reverse=True)
-    fam = assess_familiarity(query, flat, db=db, threshold=threshold)
+    fam = assess_familiarity(query, flat, db=db, threshold=threshold,
+                             recollection=recollection)
     out = fam.as_dict()
     out["score"] = fam.score
     out["abstain"] = not fam.answerable

@@ -7381,6 +7381,8 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
             _query_plan,
             {k: results.get(k, []) for k in ("procedures", "memories", "events", "context", "decisions")},
             db=db,
+            # the second (recollection) probe only matters when acting on it
+            recollection=bool(getattr(args, "abstain", False)),
         )
         if (
             _answerability.get("abstain")

@@ -28,6 +28,36 @@ _WORDS = (
 )
 
 
+def test_present_terms_matches_full_stemming():
+    text = "Kubernetes clusters were provisioned; the provisioning of happy ponies"
+    wanted = {"kubernet", "cluster", "provis", "happi", "poni", "absent"}
+    full = set(A._stem_texts([text])[0]) & wanted
+    assert A._present_terms(text, wanted) == full == wanted - {"absent"}
+    assert A._present_terms("", wanted) == set()
+
+
+def test_fts_present_terms_agrees_with_text_scan(store):
+    for q in ("What is the staging database host?",
+              "Who approved the migration from Jenkins?",
+              "When does the payments team hold standup?"):
+        t = A.salient_terms(q)
+        ids = list(range(1, len(CORPUS) + 1))
+        got = A._fts_present_terms(store, t, ids)
+        for i, text in enumerate(CORPUS, start=1):
+            assert got[i] == A._present_terms(text, set(t.stems)), (q, text)
+
+
+def test_corpus_stats_batched_in_one_statement(store):
+    seen = []
+    store.set_trace_callback(seen.append)
+    surface = {"stage": "staging", "databas": "database", "nowher": "nowhere"}
+    n, df = A._corpus_stats(store, list(surface), surface)
+    store.set_trace_callback(None)
+    assert n == len(CORPUS)
+    assert df == {"stage": 1, "databas": 1, "nowher": 0}
+    assert sum("memories_fts MATCH" in q for q in seen) == 1
+
+
 def test_porter_matches_fts5_tokenizer():
     from agentmemory.retrieval import _porter
 
@@ -68,6 +98,12 @@ def test_entities_capitalised_acronyms_and_identifiers():
     assert set(t.entities) == {"s3", "frank", "sdk"}
     # an entity is never down-weighted as an answer type
     assert "s3" not in t.focus
+
+
+def test_surface_words_kept_for_fts_queries():
+    # Porter is not idempotent: MATCH '"databas"' would look up "databa".
+    t = A.salient_terms("Which databases are staging?")
+    assert t.surface == {"databas": "databases", "stage": "staging"}
 
 
 def test_possessive_and_first_word_capital():
@@ -153,7 +189,8 @@ def store():
 
 def _hits(db, query):
     """Rows the way cmd_search hands them over: best-first, type=memory."""
-    expr = " OR ".join(A._fts_phrase(s) for s in A.salient_terms(query).stems)
+    t = A.salient_terms(query)
+    expr = " OR ".join(A._fts_phrase(t.surface[s]) for s in t.stems)
     rows = db.execute(
         "SELECT m.id, 'memory' AS type, m.content, m.category, m.tags,"
         " bm25(memories_fts, 3.0, 1.0, 1.0) AS fts_rank"
@@ -228,7 +265,8 @@ def test_recollection_finds_a_better_trace(store, monkeypatch):
     q = "When does the search team hold standup?"
     weak = [dict(r, source="keyword") for r in _hits(store, "payments team")
             if r["id"] != 5][:1]
-    fam = A.assess_familiarity(q, weak, db=store)
+    assert A.assess_familiarity(q, weak, db=store).recollection is None  # default: off
+    fam = A.assess_familiarity(q, weak, db=store, recollection=True)
     assert fam.recollection is not None and fam.recollection["improved"]
     assert fam.best_id == 5
     assert fam.score > fam.recollection["before"]

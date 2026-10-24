@@ -112,6 +112,7 @@ def term(token: str) -> str:
     return stem(fold(token))
 
 
+@lru_cache(maxsize=65536)
 def stem(word: str) -> str:
     w = word
     if len(w) < _MIN_LEN or len(w) > _MAX_LEN:
