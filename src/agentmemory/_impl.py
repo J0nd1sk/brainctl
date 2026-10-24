@@ -27,6 +27,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agentmemory.lib.mcp_helpers import days_since as _days_since
 from agentmemory.lib import pattern_separation as _pattern_sep
+from agentmemory.lib.validity import (
+    close_superseded as _close_superseded,
+    incumbent_protected as _incumbent_protected,
+    mark_valid_from as _mark_valid_from,
+    superseded_among as _superseded_among,
+    version_chain as _version_chain,
+)
 from agentmemory.paths import get_backups_dir, get_blobs_dir, get_brain_home, get_db_path
 
 logger = logging.getLogger(__name__)
@@ -3257,6 +3264,21 @@ def cmd_memory_add(args):
             )
         except Exception:
             pass  # column not yet migrated — non-fatal
+        # Interference control (migration 087), tier-aware. A weak incumbent
+        # (PII < 0.40: OPEN / ESTABLISHED) stops being valid now: close its
+        # interval and retire it so it leaves FTS and every active-memory
+        # read path; the row and the supersedes_id link stay for
+        # `brainctl memory history`. An ENTRENCHED / CRYSTALLIZED incumbent
+        # is left active and searchable. The new memory keeps the link, a
+        # valid_from and the symmetric Beta(alpha_floor, alpha_floor) prior
+        # set above, so it must earn recall evidence before it outranks the
+        # incumbent. One injected "correction" cannot erase a crystallized fact.
+        _superseded_info = _supersede_incumbent(
+            db, supersedes_id, memory_id, pii_info.get("incumbent_pii"))
+        pii_info["incumbent_retired"] = bool(_superseded_info.get("retired"))
+        db.commit()
+        if _superseded_info.get("closed"):
+            _try_vec_delete_memories(supersedes_id)
 
     # Encoding affect linkage (Eich & Metcalfe 1989, Morici et al. 2026):
     # Capture the agent's affect state at encoding time as a FK to affect_log.
@@ -3405,6 +3427,14 @@ def cmd_memory_add(args):
         # beta_floor mirrors alpha_floor (Bug 10 fix) — exposed for callers
         # that audit the gate's decision.
         out["pii_gate"] = {**pii_info, "alpha_floor": alpha_floor, "beta_floor": alpha_floor}
+    if supersedes_id:
+        out["superseded"] = {
+            "id": supersedes_id,
+            "retired": bool(_superseded_info.get("retired")),
+            "valid_to": _superseded_info.get("valid_to"),
+            "protected": bool(_superseded_info.get("protected")),
+            "incumbent_tier": pii_info.get("incumbent_tier"),
+        }
     json_out(out)
 
 def cmd_memory_search(args):
@@ -3579,8 +3609,8 @@ def cmd_memory_retire(args):
 
 def cmd_memory_replace(args):
     db = get_db()
-    # Retire old
-    db.execute("UPDATE memories SET retired_at = strftime('%Y-%m-%dT%H:%M:%S', 'now') WHERE id = ?", (args.old_id,))
+    # Retire old and close its validity interval (migration 087)
+    _close_superseded(db, args.old_id)
     # Insert new
     tags_json = json.dumps(args.tags.split(",")) if args.tags else None
     cursor = db.execute(
@@ -3594,6 +3624,22 @@ def cmd_memory_replace(args):
     db.commit()
     _try_vec_delete_memories(args.old_id)
     json_out({"ok": True, "retired_id": args.old_id, "new_id": new_id})
+
+def cmd_memory_history(args):
+    """Audit view of one fact's versions: valid-time and transaction-time.
+
+    Superseded versions are retired (out of search) but never deleted; this
+    walks the supersedes_id chain both ways from any member and lists each
+    version oldest first, with ``current`` marking the live one.
+    """
+    db = get_db()
+    chain = _version_chain(db, args.id)
+    if not chain:
+        json_out({"ok": False, "error": f"Memory {args.id} not found"})
+        return
+    current = [v["id"] for v in chain if v.get("current")]
+    json_out({"ok": True, "memory_id": args.id, "versions": chain,
+              "current_id": current[-1] if current else None})
 
 def cmd_memory_update(args):
     """Compare-and-swap update for a memory record.
@@ -3866,6 +3912,31 @@ def _pii_tier(score: float) -> str:
         if score >= threshold:
             return label
     return "OPEN"
+
+
+def _supersede_incumbent(db, old_id, new_id, incumbent_pii=None) -> dict:
+    """Apply a ``--supersedes`` write to the incumbent, PII-tier-aware.
+
+    Below ENTRENCHED: close its validity interval and retire it. At or
+    above: leave it active (``protected``) for the alpha/beta competition.
+    Either way the new memory gets ``valid_from``. ``memory replace`` does
+    not come through here; it is an explicit override and always retires.
+    The caller commits.
+    """
+    if incumbent_pii is None:
+        incumbent_pii = _compute_pii(db, old_id)
+    _mark_valid_from(db, new_id)
+    if _incumbent_protected(incumbent_pii):
+        return {"closed": False, "retired": False, "valid_to": None, "protected": True}
+    return {**_close_superseded(db, old_id, new_id), "protected": False}
+
+
+def _pii_protects(db, memory_id) -> bool:
+    """Search-time twin of the write rule: is this memory too entrenched to suppress?"""
+    try:
+        return _incumbent_protected(_compute_pii(db, int(memory_id)))
+    except Exception:
+        return False
 
 
 def cmd_memory_pii(args):
@@ -6052,6 +6123,109 @@ _BM25_MEMORIES_EXPR = "bm25(memories_fts, 3.0, 1.0, 1.0)"
 # choice for a top-K retrieval regime.
 
 
+def _created_epoch(value) -> float:
+    """``created_at`` as a UTC epoch for tie-breaking; ``-inf`` if unparseable.
+
+    Accepts ``Z``-suffixed ISO-8601, naive ISO-8601 and the legacy SQLite
+    ``YYYY-MM-DD HH:MM:SS`` shape. Unparseable or missing timestamps sort
+    as the oldest, so they never win a tie on a parse failure.
+    """
+    if not value:
+        return float("-inf")
+    try:
+        ts = str(value).strip().replace(" ", "T", 1)
+        if ts.endswith("Z"):
+            ts = ts[:-1] + "+00:00"
+        dt = datetime.fromisoformat(ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (TypeError, ValueError):
+        return float("-inf")
+
+
+def _rank_key(row, score_key: str = "final_score"):
+    """Sort key (use with ``reverse=True``): score, then newer ``created_at``.
+
+    Exact score ties are common on keyword-only search: two versions of a
+    fact ("The backend runs on Python 3.9" / "... 3.12") have the same
+    length and the same query-term frequencies, so BM25 scores them
+    identically. Ordering ties by recency makes the current version win
+    instead of whichever row happens to have the lower id.
+
+    Rows that tie on both keep their incoming order (``list.sort`` is stable
+    under ``reverse=True``): equal timestamps say nothing about which is
+    current, so a batch written in one session (a LoCoMo conversation, an
+    import) keeps its insertion order as before.
+    """
+    return (_score_of(row, score_key), _created_epoch(row.get("created_at")))
+
+
+def _score_of(row, score_key: str = "final_score") -> float:
+    try:
+        return float(row.get(score_key) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _timestamps_informative(rows) -> bool:
+    """Same test as the recency reranker gate: created_at spread >= 60s."""
+    return _stdev_seconds([r.get("created_at") for r in rows]) >= _RECENCY_STDEV_FLOOR_SECONDS
+
+
+def _sort_ranked(rows, score_key: str = "final_score"):
+    """Sort ``rows`` in place by score descending; return them.
+
+    Exact ties go to the newer row (:func:`_rank_key`), but only when the
+    candidate set's timestamps carry signal, the same gate the recency
+    reranker uses. A corpus ingested in one burst (benchmarks, imports, a
+    fresh brain) has created_at values seconds apart that say nothing about
+    which row is current, so its ties keep their incoming order.
+    """
+    if _timestamps_informative(rows):
+        rows.sort(key=lambda r: _rank_key(r, score_key), reverse=True)
+    else:
+        rows.sort(key=lambda r: _score_of(r, score_key), reverse=True)
+    return rows
+
+
+def _keyword_only_scores(fts_list):
+    """Give a keyword-only candidate list a base relevance score.
+
+    With no vector leg (no embedder, or the factual-intent / strong-anchor
+    bypasses) cmd_search used to seed every row with ``rrf_score = 0.0``.
+    Every reranker is multiplicative on that score, so recency, trust,
+    source weighting and context match all multiplied zero and the final
+    order was plain BM25 regardless of what they said.
+
+    The base score is the raw BM25 strength (``-fts_rank``): the same value
+    the per-bucket normaliser at the end of cmd_search already fell back to
+    for these rows, so with no reranker firing the output order and scores
+    are unchanged, and graph-expanded neighbours (seeded by confidence) keep
+    their place below strong keyword hits. Exact BM25 ties stay tied for
+    :func:`_rank_key` to break by recency. ``keyword_similarity`` carries
+    the same strength normalised to the best candidate, for the salience
+    path, which expects a similarity in [0, 1]. A list without usable BM25
+    values falls back to 1/(1+rank).
+    """
+    strengths = []
+    for r in fts_list:
+        try:
+            strengths.append(max(-float(r.get("fts_rank") or 0.0), 0.0))
+        except (TypeError, ValueError):
+            strengths.append(0.0)
+    top = max(strengths, default=0.0)
+    out = []
+    for i, (r, s) in enumerate(zip(fts_list, strengths)):
+        if top > 0:
+            base, sim = s, s / top
+        else:
+            base = sim = 1.0 / (i + 1)
+        out.append(r | {"rrf_score": round(base, 8), "keyword_similarity": round(sim, 6),
+                        "source": "keyword"})
+    return out
+
+
 def _rrf_fuse(fts_list, vec_list, k=_RRF_K):
     """Reciprocal Rank Fusion of two ranked lists (rank 0 = best).
 
@@ -6085,11 +6259,17 @@ def _rrf_fuse(fts_list, vec_list, k=_RRF_K):
         sources[rid] = "both" if rid in sources else "semantic"
         if rid not in rows:
             rows[rid] = row
-    # Deterministic ordering: primary -score (descending), secondary id
-    # (ascending) to break ties stably. Mixing -score with a positive id
-    # in a single key tuple lets `sorted` ascend on both — equivalent to
-    # descending score, ascending id.
-    sorted_ids = sorted(scores, key=lambda rid: (-scores[rid], rid))
+    # Deterministic ordering: score descending, then (when the timestamps
+    # carry signal, see _sort_ranked) newer created_at, then id ascending.
+    # Before interference control the secondary key was id ascending alone,
+    # so on a tie the OLDER version of a fact always won.
+    _by_recency = _timestamps_informative(list(rows.values()))
+    sorted_ids = sorted(
+        scores,
+        key=lambda rid: (-scores[rid],
+                         -_created_epoch(rows[rid].get("created_at")) if _by_recency else 0.0,
+                         rid if isinstance(rid, int) else 0),
+    )
     out = []
     for rid in sorted_ids:
         r = rows[rid].copy()
@@ -6418,6 +6598,41 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
             _adaptive_weights = None
     _max_recalls_cache = [None]  # lazy-compute once per cmd_search
 
+    # Interference control (migration 087). A memory whose valid_to has
+    # passed, or that an active memory supersedes, is a stale version of a
+    # fact. Drop it before fusion so it neither occupies a rank nor outranks
+    # the current version. Since 087 the supersede write path retires weak
+    # incumbents itself, so this mostly catches links written before the
+    # migration and AGM `supersedes` edges whose loser was never retired.
+    # Same PII rule as the write path: an ENTRENCHED / CRYSTALLIZED memory
+    # is never suppressed by a link alone; the alpha/beta competition ranks it.
+    _include_superseded = bool(getattr(args, "include_superseded", False))
+    _superseded_seen: set = set()
+    _superseded_ids: set = set()
+
+    def _drop_superseded(rows):
+        if _include_superseded or not rows:
+            return rows
+        mem_ids = [r.get("id") for r in rows
+                   if r.get("type", "memory") == "memory" and r.get("id") is not None]
+        fresh = [i for i in mem_ids if i not in _superseded_seen]
+        if fresh:
+            try:
+                _superseded_ids.update(_superseded_among(
+                    db, fresh, protect=lambda mid: _pii_protects(db, mid)))
+            except Exception:
+                pass  # suppression is best-effort; never break search
+            _superseded_seen.update(fresh)
+        if not _superseded_ids:
+            return rows
+        kept = [r for r in rows
+                if not (r.get("type", "memory") == "memory" and r.get("id") in _superseded_ids)]
+        if len(kept) != len(rows):
+            dropped = sorted({r.get("id") for r in rows} - {r.get("id") for r in kept})
+            prev = _debug_skips.get("memories.superseded_dropped") or []
+            _debug_skips["memories.superseded_dropped"] = sorted(set(prev) | set(dropped))
+        return kept
+
     def _fts_memories():
         if not fts_query:
             return []
@@ -6721,7 +6936,7 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
                 # of using the point estimate. Converts static confidence into an
                 # explore/exploit learner — uncertain memories explore, certain ones
                 # exploit their established value. (Thompson 1933, Glowacka 2019)
-                sim = r.get("rrf_score", 0.0)
+                sim = r.get("keyword_similarity", r.get("rrf_score", 0.0))
                 salience = _sal.compute_salience(
                     similarity=sim,
                     last_recalled_at=r.get("last_recalled_at"),
@@ -6781,7 +6996,14 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
             # Gated by use_qvalue — when the candidate set has insufficient
             # recall history, every Q-value sits at the 0.5 default and the
             # reranker collapses to a constant 1.0x multiplier (i.e. noise).
-            if r.get("type") == "memory" and use_qvalue:
+            #
+            # Not applied to keyword-only rows (``keyword_similarity`` is set
+            # by _keyword_only_scores). Those rows scored 0.0 before the
+            # keyword base score existed, so Q-value and quantum scoring never
+            # touched them; giving them a base score was meant to let recency
+            # work, not to switch on a learned popularity signal. On LoCoMo,
+            # where every query bumps recall counts, it cost 0.25pp Hit@1.
+            if r.get("type") == "memory" and use_qvalue and "keyword_similarity" not in r:
                 r["final_score"] = round(_q_adjusted_score(r["final_score"], r.get("q_value")), 8)
                 # Quantum amplitude scoring (brainctl quantum research Wave 1, V2-5).
                 # Only activates when confidence_phase is non-null and non-zero — progressive
@@ -6930,7 +7152,7 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
                         f"{type(exc).__name__}: {exc}"
                     )
 
-        merged.sort(key=lambda r: r["final_score"], reverse=True)
+        _sort_ranked(merged)
         return merged[:limit]
 
     if "memories" in tables:
@@ -6945,7 +7167,7 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
                 "ORDER BY recalled_count ASC, RANDOM() LIMIT ?",
                 (limit * 10,)
             ).fetchall()
-            explore_list = rows_to_list(explore_rows)
+            explore_list = _drop_superseded(rows_to_list(explore_rows))
             if explore_list:
                 recalls = sorted([r.get("recalled_count") or 0 for r in explore_list])
                 q25_thresh = recalls[len(recalls) // 4] if recalls else 0
@@ -6976,7 +7198,7 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
             else:
                 trimmed = []
         else:
-            fts_list = _fts_memories()
+            fts_list = _drop_superseded(_fts_memories())
             # FTS-confidence gate: when the top FTS result is a clearly
             # strong anchor (BM25 score below -2.0 absolute, OR top-1 at
             # least 1.5× stronger than top-3 in a result set of 3+), the
@@ -7022,11 +7244,11 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
                     f"fts_strong_anchor_top={round(top_score, 3)}"
                 )
                 hybrid = False
-            vec_list = _vec_memories()
+            vec_list = _drop_superseded(_vec_memories())
             if hybrid:
                 merged = _rrf_fuse(fts_list, vec_list)
             else:
-                merged = [r | {"rrf_score": 0.0, "source": "keyword"} for r in fts_list]
+                merged = _keyword_only_scores(fts_list)
             trimmed = _apply_recency_and_trim(merged, lambda r: r.get("scope"), use_adaptive_salience=True, bucket="memories")
             # MMR diversity reranking — applied after salience scoring, before graph expand
             if use_mmr and trimmed:
@@ -7047,7 +7269,7 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
                     pass  # contiguity bonus is optional; never break search
         if not no_graph:
             already = {r["id"] for r in trimmed}
-            graph = _graph_expand(db, trimmed, "memories", already)
+            graph = _drop_superseded(_graph_expand(db, trimmed, "memories", already))
             trimmed.extend(graph)
 
         # Quantum amplitude re-ranking.
@@ -7287,6 +7509,8 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
                     # zero rows and silently disabling graph expansion on
                     # the events bucket. Pass `tbl_key` directly.
                     extra = _graph_expand(db, top_items, tbl_key, already)
+                    if tbl_key == "memories":
+                        extra = _drop_superseded(extra)
                     results.get(tbl_key, []).extend(extra)
 
     def _seed_bucket_score(item, position):
@@ -7325,7 +7549,7 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
         for row, seed in zip(rows, seeds):
             row["retrieval_score"] = round(seed, 8)
             row["final_score"] = round(seed / max_seed, 8)
-        rows.sort(key=lambda r: r.get("final_score", 0.0), reverse=True)
+        _sort_ranked(rows)
         results[bucket_name] = rows
 
     for _bucket_name in ("procedures", "memories", "events", "context", "entities", "decisions"):
@@ -7345,7 +7569,7 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
         _rows = results.get(_bucket_name, []) or []
         for _row in _rows:
             _row["final_score"] = round(float(_row.get("final_score") or 0.0) * _multiplier, 8)
-        _rows.sort(key=lambda r: r.get("final_score", 0.0), reverse=True)
+        _sort_ranked(_rows)
         results[_bucket_name] = _rows
 
     if db_vec:
@@ -16580,7 +16804,10 @@ def build_parser():
     mem_add.add_argument("--dry-run-worthiness", action="store_true", dest="dry_run_worthiness",
                          help="Compute W(m) score and show result without writing")
     mem_add.add_argument("--supersedes", type=int, metavar="ID", dest="supersedes",
-                         help="ID of memory being superseded; applies PII recency gate")
+                         help="ID of memory being superseded. Applies the PII recency gate: an "
+                              "OPEN/ESTABLISHED incumbent (PII < 0.40) has its validity interval closed "
+                              "and is retired; an ENTRENCHED/CRYSTALLIZED one stays active until the new "
+                              "memory outcompetes it. See `brainctl memory history <id>`.")
     mem_add.add_argument("--file", dest="file_path",
                          help="Anchor memory to a source file (e.g. src/auth/jwt.ts)")
     mem_add.add_argument("--line", type=int, dest="file_line",
@@ -16693,6 +16920,11 @@ def build_parser():
         help="Infer the best category for a given content string (heuristic)"
     )
     mem_suggest.add_argument("content", help="Memory content to classify")
+
+    mem_history = mem_sub.add_parser(
+        "history",
+        help="Show every version of a fact along its supersedes chain (retired rows included)")
+    mem_history.add_argument("id", type=int, help="Any memory ID in the chain")
 
     mem_pii = mem_sub.add_parser("pii", help="Compute Proactive Interference Index for a memory")
     mem_pii.add_argument("id", type=int, help="Memory ID")
@@ -17073,6 +17305,11 @@ def build_parser():
                        help="Disable temporal recency weighting; return raw FTS rank order")
     srch.add_argument("--no-graph", action="store_true", dest="no_graph",
                        help="Disable 1-hop knowledge_edges expansion on top results")
+    srch.add_argument("--include-superseded", action="store_true", dest="include_superseded",
+                       help="Keep memories that an active memory supersedes (or whose valid_to has "
+                            "passed) in the results. Off by default: the current version of a fact wins "
+                            "(ENTRENCHED/CRYSTALLIZED incumbents are never suppressed by a link alone). "
+                            "Retired versions are listed by `brainctl memory history <id>`.")
     srch.add_argument("--budget", type=int, default=None, metavar="TOKENS",
                        help="Hard token cap on search response (trim lowest-ranked entries first)")
     srch.add_argument("--min-salience", type=float, default=None, dest="min_salience", metavar="FLOOR",
@@ -18893,7 +19130,8 @@ def main():
                      "update": cmd_memory_update,
                      "suggest-category": cmd_memory_suggest_category,
                      "confidence": cmd_memory_confidence,
-                     "pii": cmd_memory_pii, "pii-scan": cmd_memory_pii_scan}
+                     "pii": cmd_memory_pii, "pii-scan": cmd_memory_pii_scan,
+                     "history": cmd_memory_history}
         fn = dispatch.get(args.mem_cmd)
     elif args.command == "procedure":
         from agentmemory.commands.procedure import dispatch as _procedure_dispatch
