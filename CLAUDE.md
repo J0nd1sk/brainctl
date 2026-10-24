@@ -3,12 +3,12 @@
 ## What This Is
 Unified agent memory system. SQLite-backed (brain.db) with FTS5, vector embeddings (sqlite-vec + Ollama nomic-embed-text), knowledge graph, affect tracking, belief collapse mechanics, and AGM conflict resolution.
 
-Published as `brainctl` on PyPI (v2.2.1+, current 2.4.10).
+Published as `brainctl` on PyPI (v2.2.1+, current 2.8.1).
 
 ## Key Paths
-- **DB:** `db/brain.db` (WAL mode, foreign keys ON, 59 user-facing tables, 49 numbered migrations + one unnumbered V2-4 quantum-schema file). The numbered sequence has an intentional gap at 050 — the V2-4 quantum schema (`db/migrations/quantum_schema_migration_sqlite.sql`) occupies that slot without a number because it was applied ad-hoc during the V2-4 rollout and pre-dates the idempotent runner fix in 2.4.8. The runner only picks up files matching `^\d+_.+\.sql$` so the quantum file is a no-op for `brainctl migrate` on fresh installs — apply manually if you need the quantum columns on a new DB. (Audit I28 — 2026-04-19.)
+- **DB:** `db/brain.db` (WAL mode, foreign keys ON, 59 user-facing tables, 84 numbered migrations, `002`–`085` with no gaps, plus the unnumbered V2-4 file `db/migrations/quantum_schema_migration_sqlite.sql`). The runner only picks up files matching `^\d+_.+\.sql$`, so `brainctl migrate` never applies the quantum file; its quantum columns (`confidence_phase`, `hilbert_projection`, `coherence_syndrome`, `decoherence_rate`, `is_superposed`, `belief_density_matrix`, `coherence_score`, ...) and `belief_collapse_events` ship in `init_schema.sql` instead. Slot 050 is `050_thalamus.sql`.
 - **CLI:** `bin/brainctl` — main CLI entry
-- **MCP server:** canonical entry is `agentmemory.mcp_server:run`. As of v2 surface consolidation (2026-05-20): **100 visible tools** (370 registered internally; 270 hidden behind action-discriminated dispatchers). Installed as the `brainctl-mcp` console script via pip. See `MCP_SERVER.md` for the tool reference and `docs/TOOL_MIGRATION_V2.md` for v1→v2 migration. The legacy standalone `bin/brainctl-mcp` only registers a subset and is being phased out.
+- **MCP server:** the `brainctl-mcp` console script points at `agentmemory.mcp_entrypoint:run`, which prints the `pip install 'brainctl[mcp]'` hint when the MCP extra is missing and otherwise delegates to `agentmemory.mcp_server:run` (also runnable as `python -m agentmemory.mcp_server`). As of v2 surface consolidation (2026-05-20): **100 visible tools** (370 registered internally; 270 hidden behind action-discriminated dispatchers). Installed as the `brainctl-mcp` console script via pip. See `MCP_SERVER.md` for the tool reference and `docs/TOOL_MIGRATION_V2.md` for v1→v2 migration. The legacy standalone `bin/brainctl-mcp` script was removed after 2.8.1; use the console script.
 - **Bench:** `bin/brainctl-bench` — retrieval eval harness (P@k / MRR / nDCG@k regression gate, fixtures under `tests/bench/`)
 - **Source:** `src/agentmemory/` — Python package
 - **Config:** `config/` — quiet hours, consolidation schedules
@@ -432,7 +432,7 @@ Known follow-ups (not blocking the extra):
  * No `mcp__brainctl__ingest_code` tool yet — agents that want to
    trigger ingest must shell out via the CLI. MCP wrapper is a
    separate PR.
- * `init_schema.sql` won't include `code_ingest_cache` until it's
-   regenerated in a release commit. Until then, fresh installs that
-   want code-ingest need `brainctl migrate` applied after
-   `brainctl init`.
+
+`init_schema.sql` includes `code_ingest_cache` (migration 051), so a
+fresh `brainctl init` is ready for code ingest without a separate
+`brainctl migrate`.

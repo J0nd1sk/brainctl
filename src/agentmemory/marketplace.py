@@ -11,7 +11,7 @@ helpers. It exposes:
 * Token configuration — BRNDB mint address, decimals, treasury address.
 * Pricing math — USD↔BRNDB↔SOL conversion via Jupiter v6 price API,
   with Birdeye + DexScreener fallbacks.
-* Fee math — 3.5% protocol fee split (seller / treasury).
+* Fee math — 2.5% protocol fee split (seller / treasury).
 * Listing manifest builder + canonical-JSON hashing + sig verification.
 * Node-helper subprocess plumbing for the actual Solana operations
   (Jupiter swap, SPL transfer, memo posting) that have no Python SDK.
@@ -24,7 +24,7 @@ Design constraints (decision-locked 2026-05-12):
 * **USD-pegged pricing**, $10,000 cap per listing. Listings carry
   price_usd; the BRNDB amount is recomputed at buy time from the
   current Jupiter spot rate.
-* **3.5% protocol fee** (`MARKETPLACE_FEE_BPS = 350`), hardcoded.
+* **2.5% protocol fee** (`MARKETPLACE_FEE_BPS = 250`), hardcoded.
 * **Encryption-at-rest is non-negotiable** for any bundle content;
   the chain only ever sees ownership transfers + memos.
 
