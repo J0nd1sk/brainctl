@@ -31,7 +31,8 @@ Suites
                abstention precision/recall from an optional hook: when the
                search payload carries an ``answerable`` flag (or a populated
                ``metacognition.answerability_score``), that decides; otherwise
-               every query counts as answerable (the current behaviour).
+               every query counts as answerable. ``familiarity_auroc`` scores
+               the perirhinal familiarity gate's ``familiarity`` float.
 
 Embeddings
 ----------
@@ -113,6 +114,7 @@ GATES: Dict[str, Tuple[Tuple[str, str], ...]] = {
         ("overall.answerable_p_at_1", "higher"),
         ("overall.score_auroc", "higher"),
         ("overall.raw_score_auroc", "higher"),
+        ("overall.familiarity_auroc", "higher"),
         ("overall.abstention_precision", "higher"),
         ("overall.abstention_recall", "higher"),
         ("overall.false_abstention_rate", "lower"),
@@ -771,6 +773,9 @@ def run_abstention() -> Dict[str, Any]:
                 # max-normalisation (fts_rank is negative; more negative = better)
                 "top_raw_score": round(-float(top.get("fts_rank") or 0.0), 8) or 0.0,
                 "top_id": top.get("id"),
+                # Perirhinal familiarity gate score (0.0 when search does not
+                # report one, e.g. the gate module failed to import)
+                "familiarity": float(payload.get("familiarity") or 0.0),
                 "gold_rank": rank,
                 "tier": (payload.get("metacognition") or {}).get("tier"),
             })
@@ -793,6 +798,8 @@ def run_abstention() -> Dict[str, Any]:
                              [r["top_score"] for r in unanswerable_rows]),
         "raw_score_auroc": auroc([r["top_raw_score"] for r in answerable_rows],
                                  [r["top_raw_score"] for r in unanswerable_rows]),
+        "familiarity_auroc": auroc([r["familiarity"] for r in answerable_rows],
+                                   [r["familiarity"] for r in unanswerable_rows]),
         "unanswerable_nonempty_rate": safe_rate(sum(1 for r in unanswerable_rows if r["n_results"]),
                                                 len(unanswerable_rows)),
         **abstention_metrics(rows),
@@ -812,11 +819,24 @@ def run_abstention() -> Dict[str, Any]:
             "count": len(bucket),
             "top_score": score_summary(r["top_score"] for r in bucket),
             "top_raw_score": score_summary(r["top_raw_score"] for r in bucket),
+            "familiarity": score_summary(r["familiarity"] for r in bucket),
+            "abstained_rate": safe_rate(sum(1 for r in bucket if r["abstained"]), len(bucket)),
             "empty_result_rate": safe_rate(sum(1 for r in bucket if r["n_results"] == 0), len(bucket)),
             "metacognition_tiers": tiers,
         }
+    # The familiarity gate's logistic calibration was fit on one half of the
+    # queries at a time (even / odd ABSTENTION_QUERIES index) with the other
+    # half held out; report both halves so drift on either shows. Informational.
+    by_split: Dict[str, Any] = {}
+    for split, parity in (("even", 0), ("odd", 1)):
+        bucket = [r for i, r in enumerate(rows) if i % 2 == parity]
+        pos = [r["familiarity"] for r in bucket if not r["should_abstain"]]
+        neg = [r["familiarity"] for r in bucket if r["should_abstain"]]
+        by_split[split] = {"count": len(bucket), "familiarity_auroc": auroc(pos, neg),
+                           **abstention_metrics(bucket)}
     return {
         "suite": "abstention",
+        "by_split": by_split,
         "k": TOP_K,
         "overall": overall,
         "top_score": {
@@ -826,6 +846,10 @@ def run_abstention() -> Dict[str, Any]:
         "top_raw_score": {
             "answerable": score_summary(r["top_raw_score"] for r in answerable_rows),
             "unanswerable": score_summary(r["top_raw_score"] for r in unanswerable_rows),
+        },
+        "familiarity": {
+            "answerable": score_summary(r["familiarity"] for r in answerable_rows),
+            "unanswerable": score_summary(r["familiarity"] for r in unanswerable_rows),
         },
         "implicit_empty_result_abstention": implicit,
         "by_kind": by_kind,

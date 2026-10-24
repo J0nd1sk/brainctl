@@ -7603,21 +7603,32 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
         key=lambda item: item.get("final_score", 0.0),
         reverse=True,
     )
+    # Perirhinal familiarity gate (agentmemory.retrieval.answerability):
+    # scores whether the hits look like an answer or just share vocabulary.
+    # Default: annotate only. Results are dropped only on explicit --abstain.
     _answerability = None
-    if _query_plan is not None:
-        try:
-            from agentmemory.retrieval.answerability import assess_answerability as _assess_answerability
+    _abstained = False
+    try:
+        from agentmemory.retrieval.answerability import assess_answerability as _assess_answerability
 
-            _answerability = _assess_answerability(
-                query,
-                _query_plan,
-                {k: results.get(k, []) for k in ("procedures", "memories", "events", "context", "decisions")},
-            )
-            if _answerability.get("abstain") and _query_plan.abstain_allowed:
-                for key in ("memories", "events", "context", "decisions", "procedures"):
-                    results[key] = []
-        except Exception as exc:
-            _debug_skips["answerability.skipped"] = f"{type(exc).__name__}: {exc}"
+        _answerability = _assess_answerability(
+            query,
+            _query_plan,
+            {k: results.get(k, []) for k in ("procedures", "memories", "events", "context", "decisions")},
+            db=db,
+            # the second (recollection) probe only matters when acting on it
+            recollection=bool(getattr(args, "abstain", False)),
+        )
+        if (
+            _answerability.get("abstain")
+            and getattr(args, "abstain", False)
+            and getattr(_query_plan, "abstain_allowed", True)
+        ):
+            for key in ("memories", "events", "context", "decisions", "procedures"):
+                results[key] = []
+            _abstained = True
+    except Exception as exc:
+        _debug_skips["answerability.skipped"] = f"{type(exc).__name__}: {exc}"
 
     total = sum(len(v) for v in results.values())
     tokens_out = _estimate_tokens(results)
@@ -7791,12 +7802,19 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
             "note": tier_note,
             "answerability_score": (_answerability or {}).get("score"),
             "answerability_reason": (_answerability or {}).get("reason"),
-            "abstained": (_answerability or {}).get("abstain", False),
+            "abstained": _abstained,
             **_intent_meta,
             **_rollout_meta,
         },
         **results,
     }
+    if _answerability is not None:
+        _out["answerable"] = bool(not _answerability.get("abstain"))
+        _out["familiarity"] = _answerability.get("familiarity")
+        if _debug_mode:
+            _debug_skips["familiarity"] = {
+                k: v for k, v in _answerability.items() if k not in ("score", "abstain")
+            }
     if _triggered:
         _out["triggered_memories"] = _triggered
     # 2.3.1: surface reranker signal-informativeness gate decisions so an
@@ -17365,6 +17383,11 @@ def build_parser():
                             "only appears when at least one gate tripped; with --debug, you get "
                             "`_debug: {\"all_signals_informative\": true}` even on clean runs so "
                             "downstream tooling can rely on the key always being present.")
+    srch.add_argument("--abstain", action="store_true", default=False,
+                       help="Perirhinal familiarity gate: when the query looks unfamiliar "
+                            "(familiarity below threshold), return empty result buckets with "
+                            "answerable=false instead of near-topic hits. Without this flag the "
+                            "hits are always returned and only answerable/familiarity are added.")
 
     # --- promote ---
     prom = sub.add_parser("promote", help="Promote an event to a durable memory")
