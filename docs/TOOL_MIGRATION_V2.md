@@ -95,6 +95,12 @@ subsystem.
 | `memory_pii(...)` | `memory_admin(action="pii", payload={...})` |
 | `agent_list(...)` | `agent_admin(action="list", payload={...})` |
 | `agent_activity(...)` | `agent_admin(action="activity", payload={...})` |
+| `cognition_list()` | `agent_admin(action="cognition_list")` |
+| `cognition_show(name)` | `agent_admin(action="cognition_show", payload={name})` |
+| `cognition_set(agent_id, profile)` | `agent_admin(action="cognition_set", payload={agent_id, profile})` |
+| `affect_log_sensory(...)` | `agent_admin(action="affect_log_sensory", payload={agent_id, sensory_dimensions, ...})` |
+| `interest_add(entity, strength)` | `entity_admin(action="interest_add", payload={entity, strength})` |
+| `interest_list(...)` | `entity_admin(action="interest_list", payload={...})` |
 | `handoff_consume(...)` | `handoff_admin(action="consume", payload={...})` |
 | `handoff_pin(...)` | `handoff_admin(action="pin", payload={...})` |
 | `trigger_list(...)` | `trigger_admin(action="list", payload={...})` |
