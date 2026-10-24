@@ -935,6 +935,10 @@ def tool_memory_add(agent_id: str, content: str, category: str, scope: str = "gl
             db.execute("UPDATE memories SET gated_from_memory_id = ? WHERE id = ?", (supersedes_id, mid))
         except Exception:
             pass
+        # Interference control (migration 087): close the superseded fact's
+        # validity interval and retire it — same as `memory add --supersedes`.
+        from agentmemory.lib.validity import close_superseded as _close_superseded
+        _superseded_info = _close_superseded(db, supersedes_id, mid)
 
     # Encoding affect linkage (Eich & Metcalfe 1989, Morici et al. 2026):
     # Capture the agent's affect state at encoding time as a FK to affect_log.
@@ -993,6 +997,12 @@ def tool_memory_add(agent_id: str, content: str, category: str, scope: str = "gl
         result["valence_scale"] = round(_valence_scale, 4)
     if pii_gate_info:
         result["pii_gate"] = pii_gate_info
+    if supersedes_id:
+        result["superseded"] = {
+            "id": supersedes_id,
+            "retired": bool(_superseded_info.get("retired")),
+            "valid_to": _superseded_info.get("valid_to"),
+        }
     return result
 
 
@@ -2482,7 +2492,7 @@ TOOLS = [
                 "tags": {"type": "string", "description": "Comma-separated tags"},
                 "memory_type": {"type": "string", "enum": ["episodic", "semantic", "procedural"], "default": "episodic"},
                 "force": {"type": "boolean", "description": "Bypass W(m) worthiness gate", "default": False},
-                "supersedes_id": {"type": "integer", "description": "ID of memory being superseded; triggers PII recency gate"},
+                "supersedes_id": {"type": "integer", "description": "ID of memory being superseded; triggers the PII recency gate, then closes the old memory's validity interval and retires it so the new value wins search"},
                 "source": {
                     "type": "string",
                     "enum": list(_SOURCE_TRUST_WEIGHTS),

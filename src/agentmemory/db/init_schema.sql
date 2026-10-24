@@ -93,7 +93,9 @@ CREATE TABLE memories (
     temporal_level TEXT NOT NULL DEFAULT 'moment'
         CHECK(temporal_level IN ('moment','session','day','week','month','quarter')),
     next_review_at TEXT DEFAULT NULL,
-    q_value REAL DEFAULT 0.5
+    q_value REAL DEFAULT 0.5,
+    valid_from TEXT DEFAULT NULL,                     -- valid-time start (NULL = since created_at), migration 087
+    valid_to TEXT DEFAULT NULL                        -- valid-time end (NULL = still true); set on supersede
 );
 
 CREATE INDEX idx_memories_agent ON memories(agent_id);
@@ -4051,3 +4053,10 @@ CREATE TABLE IF NOT EXISTS olfactory_imprints (
 CREATE INDEX IF NOT EXISTS idx_oi_recent ON olfactory_imprints(imprinted_at);
 CREATE INDEX IF NOT EXISTS idx_oi_content ON olfactory_imprints(content_hash);
 CREATE INDEX IF NOT EXISTS idx_oi_valence ON olfactory_imprints(valence);
+
+-- Migration 087: bi-temporal validity on memories (interference control).
+-- valid_from / valid_to live in the base CREATE TABLE memories above.
+CREATE INDEX IF NOT EXISTS idx_memories_supersedes
+    ON memories(supersedes_id) WHERE supersedes_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_memories_valid_to
+    ON memories(valid_to) WHERE valid_to IS NOT NULL;
