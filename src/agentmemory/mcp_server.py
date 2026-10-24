@@ -28,6 +28,7 @@ from typing import Any
 
 from agentmemory.lib.mcp_helpers import now_iso, safe_fts
 from agentmemory.lib import lifecycle as _lifecycle
+from agentmemory.lib import pattern_separation as _pattern_sep
 from agentmemory.paths import get_db_path
 # Import the canonical surprise scorer from _impl.py — see bug-fix note
 # below at the former _surprise_score_mcp callsite.
@@ -670,6 +671,30 @@ def tool_memory_add(agent_id: str, content: str, category: str, scope: str = "gl
     # Surprise scoring — lightweight novelty check.
     # _embed_safe already catches network errors and returns None.
     blob = _embed_safe(content)
+
+    # DG pattern separation / CA3 pattern completion — the same three-way
+    # write decision as the CLI `memory add` path
+    # (agentmemory.lib.pattern_separation). Near-identical, no key-token
+    # difference → reinforce the existing memory, no insert; similar but a
+    # number / date / negation / entity differs → write + distinct_from edge.
+    # Skipped for force=true and for explicit supersedes_id.
+    dg_decision = _pattern_sep.Decision(_pattern_sep.NOVEL)
+    if not force and not supersedes_id:
+        dg_decision = _pattern_sep.evaluate(
+            db, content, agent_id, scope, category,
+            blob=blob, get_vec_db=_get_vec_db if blob else None,
+        )
+    if dg_decision.action == _pattern_sep.REINFORCE:
+        try:
+            result = _pattern_sep.apply_reinforce(db, dg_decision, agent_id, scope, _now_ts())
+            db.close()
+            return result
+        except Exception as exc:
+            logger.debug("DG reinforce failed (non-fatal): %s", exc)
+    # A key-token difference is positive evidence of a distinct fact: the
+    # similarity-driven rejections below must not fold it into its neighbour.
+    dg_separated = dg_decision.action == _pattern_sep.SEPARATE
+
     try:
         surprise, surprise_method = _surprise_score(db, content, blob=blob)
     except Exception:
@@ -721,7 +746,7 @@ def tool_memory_add(agent_id: str, content: str, category: str, scope: str = "gl
         temporal_recency=1.0,
         content_type_prior=_content_type_prior,
     )
-    if _pre_worthiness < 0.3 and not force:
+    if _pre_worthiness < 0.3 and not force and not dg_separated:
         try:
             db.execute(
                 "INSERT INTO events (agent_id, event_type, summary, metadata, created_at) "
@@ -794,7 +819,7 @@ def tool_memory_add(agent_id: str, content: str, category: str, scope: str = "gl
     except Exception as exc:
         logger.debug("W(m) gate failed (non-fatal): %s", exc)
 
-    if worthiness_reason and not force:
+    if worthiness_reason and not force and not dg_separated:
         # Log rejection event
         try:
             db.execute(
@@ -963,6 +988,9 @@ def tool_memory_add(agent_id: str, content: str, category: str, scope: str = "gl
         except Exception:
             pass  # non-fatal
 
+    # DG separation edges + hippocampus_pattern_separations audit row
+    dg_summary = _pattern_sep.after_insert(db, mid, dg_decision, agent_id, scope, _now_ts())
+
     # Record gated_from_memory_id if column exists (migration 025)
     if supersedes_id:
         try:
@@ -1020,6 +1048,8 @@ def tool_memory_add(agent_id: str, content: str, category: str, scope: str = "gl
               "memory_type": memory_type}
     if procedure_id is not None:
         result["procedure_id"] = procedure_id
+    if dg_summary:
+        result["pattern_separation"] = dg_summary
     if _schema_resonance_hit:
         result["schema_resonance"] = _schema_resonance
         result["schema_resonance_fast_track"] = True
