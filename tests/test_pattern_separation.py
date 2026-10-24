@@ -285,3 +285,42 @@ def test_known_entity_from_db_separates_lowercase_swap(mcp):
     second = add("the ingestion pipeline is owned by the zephyr team", category="project")
     assert second["pattern_separation"]["decision"] == "separate"
     assert second["pattern_separation"]["key_token_diff"] == {"entity": ["atlas"]}
+
+
+# ---------------------------------------------------------------------------
+# Retrieval: graph expansion must not follow distinct_from
+# ---------------------------------------------------------------------------
+
+def _default_search(query):
+    import agentmemory._impl as _impl
+    args = types.SimpleNamespace(
+        query=query, limit=10, tables="memories", no_recency=False,
+        no_graph=False, budget=None, min_salience=None, mmr=False,
+        mmr_lambda=0.7, explore=False, profile=None, pagerank_boost=0.0,
+        quantum=False, benchmark=False, agent=AGENT, format="json",
+        oneline=False, verbose=False, output="return",
+    )
+    payload = _impl.cmd_search(args)
+    return payload.get("memories") or []
+
+
+def test_graph_expansion_skips_distinct_from_sibling(cli, monkeypatch):
+    import agentmemory._impl as _impl
+    db_file, add = cli
+    old = add("The maximum upload size is 10 MB", category="environment")["memory_id"]
+    new = add("The maximum upload size is 25 MB", category="environment")
+    assert new["pattern_separation"]["decision"] == "separate"
+    new_id = new["memory_id"]
+
+    # "25" only matches the new fact lexically, so the old value could only
+    # come back through a graph hop over the distinct_from edge.
+    ids = [r["id"] for r in _default_search("25")]
+    assert new_id in ids
+    assert old not in ids
+
+    # Control: with the exclusion lifted the sibling does come back via the
+    # graph, so the assertion above really exercises the filter.
+    monkeypatch.setattr(_impl, "_GRAPH_EXPAND_EXCLUDED_RELATIONS", ("__none__",))
+    leaked = {r["id"]: r for r in _default_search("25")}
+    assert old in leaked and leaked[old].get("source") == "graph"
+    assert leaked[old].get("relation") == ps.SEPARATION_RELATION

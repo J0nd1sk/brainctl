@@ -6099,11 +6099,20 @@ def _rrf_fuse(fts_list, vec_list, k=_RRF_K):
     return out
 
 
+# Relations _graph_expand must not follow. ``distinct_from`` (DG pattern
+# separation, agentmemory.lib.pattern_separation) links a memory to a
+# similar-but-different sibling, e.g. the old value of an updated fact;
+# following it would pull the sibling back into results it was separated from.
+_GRAPH_EXPAND_EXCLUDED_RELATIONS = (_pattern_sep.SEPARATION_RELATION,)
+
+
 def _graph_expand(db, top_results, table_hint, already_ids, limit=5):
     """1-hop knowledge_edges expansion from top-``limit`` results.
 
     Returns list of neighbor rows annotated with source="graph" and the
     relation that connected them.  Skips IDs already in ``already_ids``.
+    Edges whose relation is in ``_GRAPH_EXPAND_EXCLUDED_RELATIONS`` are not
+    followed in either direction.
     """
     graph_rows = []
     seen = set(already_ids)
@@ -6115,16 +6124,20 @@ def _graph_expand(db, top_results, table_hint, already_ids, limit=5):
         if node_id is None:
             continue
         # Fetch both outbound and inbound edges for this node
+        _excl = ",".join("?" * len(_GRAPH_EXPAND_EXCLUDED_RELATIONS))
         edges = db.execute(
             "SELECT target_table as nb_table, target_id as nb_id, relation_type, weight "
             "FROM knowledge_edges WHERE source_table=? AND source_id=? "
             "AND target_table IN ('memories','events','context') "
+            f"AND relation_type NOT IN ({_excl}) "
             "UNION ALL "
             "SELECT source_table as nb_table, source_id as nb_id, relation_type, weight "
             "FROM knowledge_edges WHERE target_table=? AND target_id=? "
             "AND source_table IN ('memories','events','context') "
+            f"AND relation_type NOT IN ({_excl}) "
             "ORDER BY weight DESC LIMIT 10",
-            (table_hint, node_id, table_hint, node_id),
+            (table_hint, node_id, *_GRAPH_EXPAND_EXCLUDED_RELATIONS,
+             table_hint, node_id, *_GRAPH_EXPAND_EXCLUDED_RELATIONS),
         ).fetchall()
 
         for edge in edges:
