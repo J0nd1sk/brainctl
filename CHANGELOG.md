@@ -27,7 +27,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   default. Pass `--abstain` (CLI) or `abstain=true` (MCP) to get empty
   results instead when the query looks unfamiliar. On the abstention
   bench: familiarity AUROC 0.9955, abstention precision 1.0 and recall
-  0.625, answerable P@1 still 1.0.
+  0.6875, answerable P@1 still 1.0.
+- **DG pattern separation + CA3 pattern completion on writes**
+  (`agentmemory.lib.pattern_separation`): one three-way write decision,
+  shared by `brainctl memory add` and the MCP `memory_add` tool. Near
+  neighbours (same agent / scope / category) are scored by a normalised
+  lexical signature (casefold, punctuation stripped, token-set Jaccard,
+  FTS5 candidates), or by cosine when an embedding exists. Near-identical
+  with no key-token difference → the existing memory is reinforced
+  (confidence, `recalled_count`, `alpha`), no insert. Similar but a key
+  token differs (number, date word, negation, proper noun / known entity)
+  → written as its own memory plus a `distinct_from` knowledge edge.
+  Decisions are logged to `hippocampus_pattern_separations`. Dedup bench:
+  exact + case/punctuation duplicates now 100% suppressed on both paths
+  (MCP was 0%), false merges 0 (was 16.7%, the negation flips).
+
+### Changed
+
+- The CLI's old pre-insert Jaccard dedup (all-words FTS AND match, raw
+  whitespace tokens, any scope) is replaced by the shared gate above. A
+  `--supersedes` / `supersedes_id` write skips the gate, and a
+  key-token-separated write is no longer rejected by the A-MAC / W(m)
+  near-duplicate branches (scores and tier routing are unchanged).
 
 ## [2.8.1] — 2026-10-23 — *hotfix: MCP install crash + search index loss*
 
