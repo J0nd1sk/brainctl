@@ -125,6 +125,42 @@ def seed_brain(brain) -> None:
         )
 
 
+INIT_SCHEMA_PATH = _ROOT / "src" / "agentmemory" / "db" / "init_schema.sql"
+
+
+def init_bench_schema(conn, agent_id: str = "bench-agent") -> str:
+    """Apply init_schema.sql plus the minimal rows cmd_search expects.
+
+    Shared by :func:`seed_db_direct` and the memory-quality suites
+    (``tests.bench.memory_quality``), which start from the same empty brain
+    and then write through the real ``memory add`` path. Returns the ISO
+    timestamp used for the bootstrap rows. Does not commit.
+    """
+    from datetime import datetime, timezone
+
+    conn.executescript(INIT_SCHEMA_PATH.read_text())
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    conn.execute(
+        "INSERT OR IGNORE INTO agents (id, display_name, agent_type, status, created_at, updated_at) "
+        "VALUES (?, ?, 'bench', 'active', ?, ?)",
+        (agent_id, agent_id, now, now),
+    )
+    # Minimal workspace/neuro defaults the real CLI expects in cmd_search.
+    conn.execute(
+        "INSERT OR IGNORE INTO workspace_config (key, value) VALUES ('enabled', '0')"
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO neuromodulation_state (
+            id, org_state, dopamine_signal, arousal_level,
+            confidence_boost_rate, confidence_decay_rate, retrieval_breadth_multiplier,
+            focus_level, temporal_lambda, context_window_depth
+        ) VALUES (1, 'normal', 0.0, 0.3, 0.1, 0.02, 1.0, 0.3, 0.03, 50)
+        """
+    )
+    return now
+
+
 def seed_db_direct(db_path: Path, agent_id: str = "bench-agent") -> None:
     """Initialise a fresh brain.db and seed it via direct SQL.
 
@@ -135,33 +171,12 @@ def seed_db_direct(db_path: Path, agent_id: str = "bench-agent") -> None:
     """
     import sqlite3
     import json as _json
-    from datetime import datetime, timezone
 
-    init_sql = Path(__file__).resolve().parent.parent.parent / "src" / "agentmemory" / "db" / "init_schema.sql"
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     conn = sqlite3.connect(str(db_path))
     try:
-        conn.executescript(init_sql.read_text())
-        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-        conn.execute(
-            "INSERT OR IGNORE INTO agents (id, display_name, agent_type, status, created_at, updated_at) "
-            "VALUES (?, ?, 'bench', 'active', ?, ?)",
-            (agent_id, agent_id, now, now),
-        )
-        # Minimal workspace/neuro defaults the real CLI expects in cmd_search.
-        conn.execute(
-            "INSERT OR IGNORE INTO workspace_config (key, value) VALUES ('enabled', '0')"
-        )
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO neuromodulation_state (
-                id, org_state, dopamine_signal, arousal_level,
-                confidence_boost_rate, confidence_decay_rate, retrieval_breadth_multiplier,
-                focus_level, temporal_lambda, context_window_depth
-            ) VALUES (1, 'normal', 0.0, 0.3, 0.1, 0.02, 1.0, 0.3, 0.03, 50)
-            """
-        )
+        now = init_bench_schema(conn, agent_id)
 
         for mem in MEMORIES:
             conn.execute(

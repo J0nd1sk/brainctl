@@ -1,0 +1,92 @@
+{
+  "by_kind": {
+    "exact": {
+      "collapse_rate": 1.0,
+      "count": 6
+    },
+    "near_miss": {
+      "collapse_rate": 0.1667,
+      "count": 12
+    },
+    "paraphrase": {
+      "collapse_rate": 0.0,
+      "count": 8
+    },
+    "surface": {
+      "collapse_rate": 0.3333,
+      "count": 6
+    }
+  },
+  "by_write_path": {
+    "cli": {
+      "active_memories_after": 54,
+      "duplicate_suppression_rate": 0.4,
+      "false_merge_rate": 0.1667,
+      "n_duplicates": 20,
+      "n_invalid": 0,
+      "n_near_miss": 12,
+      "n_pairs": 32,
+      "separation_accuracy": 0.5625
+    },
+    "mcp": {
+      "active_memories_after": 64,
+      "duplicate_suppression_rate": 0.0,
+      "false_merge_rate": 0.0,
+      "n_duplicates": 20,
+      "n_invalid": 0,
+      "n_near_miss": 12,
+      "n_pairs": 32,
+      "separation_accuracy": 0.375
+    }
+  },
+  "by_write_path_kind": {
+    "cli": {
+      "exact": {
+        "collapse_rate": 1.0,
+        "count": 6
+      },
+      "near_miss": {
+        "collapse_rate": 0.1667,
+        "count": 12
+      },
+      "paraphrase": {
+        "collapse_rate": 0.0,
+        "count": 8
+      },
+      "surface": {
+        "collapse_rate": 0.3333,
+        "count": 6
+      }
+    },
+    "mcp": {
+      "exact": {
+        "collapse_rate": 0.0,
+        "count": 6
+      },
+      "near_miss": {
+        "collapse_rate": 0.0,
+        "count": 12
+      },
+      "paraphrase": {
+        "collapse_rate": 0.0,
+        "count": 8
+      },
+      "surface": {
+        "collapse_rate": 0.0,
+        "count": 6
+      }
+    }
+  },
+  "overall": {
+    "active_memories_after": 54,
+    "duplicate_suppression_rate": 0.4,
+    "false_merge_rate": 0.1667,
+    "n_duplicates": 20,
+    "n_invalid": 0,
+    "n_near_miss": 12,
+    "n_pairs": 32,
+    "separation_accuracy": 0.5625
+  },
+  "primary_write_path": "cli",
+  "suite": "dedup"
+}

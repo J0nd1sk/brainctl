@@ -10,6 +10,9 @@ Examples:
     python -m tests.bench.run --bench locomo --check-strict  # + slice + latency gates
     python -m tests.bench.run --bench longmemeval --check-strict \
             --report-json reports/longmemeval.json
+    python -m tests.bench.run --suite all                    # retrieval + memory-quality
+    python -m tests.bench.run --suite dedup --check-memory   # one memory suite, gated
+    python -m tests.bench.run --suite all --check --check-memory
 
 All bench entries share the same regression-tolerance / baseline JSON
 pattern so a single CI command (``--check``) can gate any of them.
@@ -27,6 +30,13 @@ Flag overview
 ``--report-json P``  : dump a machine-readable pass/fail summary to P.
                        Includes overall + slice + latency checks. Used by
                        the CI workflow to post a matrix on the PR.
+``--suite S``        : (search-quality) ``retrieval`` (default, unchanged
+                       output), one of the memory-quality suites ``dedup`` /
+                       ``temporal`` / ``abstention`` (see
+                       ``tests/bench/memory_quality.py``), or ``all``.
+``--check-memory``   : opt-in >2% regression gate for the memory-quality
+                       suites against ``baselines/memory_<suite>.json``.
+                       ``--check`` keeps gating retrieval only.
 """
 
 from __future__ import annotations
@@ -306,8 +316,84 @@ def _finalise(
     return exit_code
 
 
-def _run_search_quality_cli(args: argparse.Namespace) -> int:
-    """Original search-quality bench — preserved verbatim from prior versions."""
+MEMORY_SUITES = ("dedup", "temporal", "abstention")
+SUITE_CHOICES = ("retrieval", *MEMORY_SUITES, "all")
+
+
+def _selected_memory_suites(suite: str) -> List[str]:
+    if suite == "all":
+        return list(MEMORY_SUITES)
+    if suite in MEMORY_SUITES:
+        return [suite]
+    return []
+
+
+def _run_memory_suites(args: argparse.Namespace, names: List[str]) -> tuple:
+    """Run the memory-quality suites (tests.bench.memory_quality).
+
+    Returns ``(suites_payload, exit_code)``. Gating is opt-in via
+    ``--check-memory``; plain ``--check`` never looks at these suites.
+    """
+    from tests.bench import memory_quality as _mq
+
+    payload: Dict[str, Any] = {}
+    exit_code = 0
+    for name in names:
+        result = _mq.run_suite(name)
+        if args.update_baseline:
+            path = _mq.save_baseline(name, result)
+            print(f"wrote baseline to {path}", file=sys.stderr)
+        entry = {k: v for k, v in result.items() if k != "rows"}
+        if args.rows:
+            entry["rows"] = result.get("rows")
+        if args.check_memory:
+            base = _mq.load_baseline(name)
+            if base is None:
+                print(f"no baseline at {_mq.baseline_path(name)}; run with "
+                      f"--suite {name} --update-baseline first", file=sys.stderr)
+                entry["diff"] = None
+                exit_code = max(exit_code, 2)
+            else:
+                diff = _mq.compare_suite(result, base, _mq.GATES[name])
+                entry["diff"] = diff
+                if not diff["ok"]:
+                    exit_code = max(exit_code, 1)
+                    for f in diff["failing"]:
+                        print(f"[memory gate] {name}: {f['metric']} "
+                              f"{f['baseline']} -> {f['current']} "
+                              f"({f['direction']} is better)", file=sys.stderr)
+        payload[name] = entry
+    return payload, exit_code
+
+
+def _run_memory_only_cli(args: argparse.Namespace, names: List[str]) -> int:
+    if args.check or args.check_strict:
+        print("note: --check / --check-strict gate the retrieval suite only; "
+              "use --check-memory for the memory-quality suites", file=sys.stderr)
+    suites, exit_code = _run_memory_suites(args, names)
+    out = {"bench": "memory-quality", "suites": suites}
+    if args.report_json:
+        _write_report(Path(args.report_json), {
+            "bench": "memory-quality",
+            "suites": suites,
+            "pass": exit_code == 0,
+        })
+    print(json.dumps(out, indent=2, sort_keys=True))
+    return exit_code
+
+
+def _run_search_quality_cli(args: argparse.Namespace,
+                            memory_suites: Optional[List[str]] = None) -> int:
+    """Original search-quality bench — preserved verbatim from prior versions.
+
+    ``memory_suites`` (from ``--suite all``) appends the memory-quality
+    results under ``memory_quality`` without changing any existing key.
+    """
+    memory_payload: Optional[Dict[str, Any]] = None
+    memory_exit = 0
+    if memory_suites:
+        memory_payload, memory_exit = _run_memory_suites(args, memory_suites)
+
     result = _run_search_quality(k=args.k, pipeline=args.pipeline)
 
     if args.update_baseline:
@@ -354,11 +440,17 @@ def _run_search_quality_cli(args: argparse.Namespace) -> int:
         if not legacy_diff["ok"]:
             exit_code = 1
 
+    if memory_payload is not None:
+        out["memory_quality"] = memory_payload
+        if memory_exit:
+            exit_code = max(exit_code, memory_exit)
+
     if args.report_json:
-        _write_report(
-            Path(args.report_json),
-            _build_report("search-quality", result, base, legacy_diff, None),
-        )
+        report = _build_report("search-quality", result, base, legacy_diff, None)
+        if memory_payload is not None:
+            report["memory_quality"] = memory_payload
+            report["pass"] = bool(report["pass"] and memory_exit == 0)
+        _write_report(Path(args.report_json), report)
 
     print(json.dumps(out, indent=2, sort_keys=True))
     return exit_code
@@ -403,6 +495,14 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="(search-quality) include per-query rows in JSON output")
     p.add_argument("--pipeline", choices=("cmd", "brain"), default="cmd",
                    help="(search-quality) search path: cmd (full hybrid) or brain (FTS5)")
+    p.add_argument("--suite", choices=SUITE_CHOICES, default="retrieval",
+                   help="(search-quality) which suites to run: retrieval (default; the "
+                        "static P@k/MRR/nDCG bench), the memory-quality suites dedup / "
+                        "temporal / abstention, or all")
+    p.add_argument("--check-memory", action="store_true",
+                   help="(search-quality) opt-in gate for the memory-quality suites: "
+                        "exit non-zero on a >2%% regression vs "
+                        "tests/bench/baselines/memory_<suite>.json. Independent of --check.")
 
     # external-bench flags
     p.add_argument("--backend", choices=("brain", "cmd"), default=None,
@@ -424,11 +524,21 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _build_parser().parse_args()
+    memory_suites = _selected_memory_suites(args.suite)
+    if args.bench != "search-quality" and args.suite != "retrieval":
+        print("--suite applies to --bench search-quality only", file=sys.stderr)
+        return 2
+    if args.check_memory and not memory_suites:
+        print("--check-memory needs a memory-quality suite: "
+              "--suite all|dedup|temporal|abstention", file=sys.stderr)
+        return 2
     if args.bench == "locomo":
         return _run_locomo(args)
     if args.bench == "longmemeval":
         return _run_longmemeval(args)
-    return _run_search_quality_cli(args)
+    if args.suite in MEMORY_SUITES:
+        return _run_memory_only_cli(args, memory_suites)
+    return _run_search_quality_cli(args, memory_suites=memory_suites or None)
 
 
 if __name__ == "__main__":

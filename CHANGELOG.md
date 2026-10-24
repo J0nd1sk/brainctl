@@ -5,6 +5,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **Memory-quality bench suites** (`tests/bench/memory_quality.py`):
+  `dedup` (duplicate suppression vs. false merges in the write gate),
+  `temporal` (latest-value P@1 and stale-value intrusion after updates)
+  and `abstention` (top-score distribution and abstention precision/recall
+  on unanswerable queries). They write through `memory add` (plus the MCP
+  `memory_add` tool for dedup) and query through `cmd_search`, need no
+  Ollama, and run under `python -m tests.bench.run --suite
+  all|dedup|temporal|abstention`. Baselines live in
+  `tests/bench/baselines/memory_*.json`; gating is opt-in via
+  `--check-memory`. The default run and `--check` are unchanged.
+
 ## [2.8.1] — 2026-10-23 — *hotfix: MCP install crash + search index loss*
 
 ### Fixed
