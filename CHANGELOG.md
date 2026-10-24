@@ -17,6 +17,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   all|dedup|temporal|abstention`. Baselines live in
   `tests/bench/baselines/memory_*.json`; gating is opt-in via
   `--check-memory`. The default run and `--check` are unchanged.
+- **Familiarity gate: search can say "not in memory"**
+  (`src/agentmemory/retrieval/answerability.py`). `brainctl search` JSON
+  and the MCP `memory_search` / `search` results now include
+  `answerable` (bool) and `familiarity` (0-1). The score is built from
+  evidence taken before score normalisation: IDF-weighted query-term
+  coverage, a BM25 ratio, named-entity overlap, the top-1/top-2 margin
+  and vector similarity when it exists. Hits are still returned by
+  default. Pass `--abstain` (CLI) or `abstain=true` (MCP) to get empty
+  results instead when the query looks unfamiliar. On the abstention
+  bench: familiarity AUROC 0.9955, abstention precision 1.0 and recall
+  0.625, answerable P@1 still 1.0.
 
 ## [2.8.1] — 2026-10-23 — *hotfix: MCP install crash + search index loss*
 

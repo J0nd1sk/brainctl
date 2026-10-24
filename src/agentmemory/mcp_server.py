@@ -999,6 +999,26 @@ def tool_memory_add(agent_id: str, content: str, category: str, scope: str = "gl
 _SEMANTIC_CONFIDENCE_BONUS = 1.1  # CLS: semantic memories get a mild ranking boost when no type filter is applied
 
 
+def _familiarity_gate(db, query: str, rows: list, abstain: bool = False):
+    """Perirhinal familiarity gate for the MCP search tools.
+
+    Returns ``(rows, fields)``: ``fields`` holds ``answerable`` /
+    ``familiarity`` for the response. ``rows`` comes back unchanged unless
+    ``abstain`` is set and the query looks unfamiliar, in which case it is
+    empty. Any failure leaves the rows alone and adds nothing.
+    """
+    try:
+        from agentmemory.retrieval.answerability import assess_familiarity
+        fam = assess_familiarity(query, rows, db=db)
+    except Exception:
+        return rows, {}
+    fields = {"answerable": fam.answerable, "familiarity": fam.score}
+    if abstain and not fam.answerable:
+        fields["abstained"] = True
+        return [], fields
+    return rows, fields
+
+
 def tool_memory_search(agent_id: str, query: str, category: str = None,
                        scope: str = None, limit: int = 20,
                        memory_type: str = None,
@@ -1008,8 +1028,14 @@ def tool_memory_search(agent_id: str, query: str, category: str = None,
                        temporal_expand_hours: int = 0,
                        profile: str = None,
                        benchmark: bool = False,
-                       rerank=False) -> dict:
-    """``rerank`` (2.4.0+):
+                       rerank=False,
+                       abstain: bool = False) -> dict:
+    """``abstain``: when true and the familiarity gate finds the query
+    unfamiliar, return no memories (``answerable: false``) instead of
+    near-topic hits. Default false: hits are always returned and only
+    ``answerable`` / ``familiarity`` are added.
+
+    ``rerank`` (2.4.0+):
         - False / None / "" → no cross-encoder rerank (default)
         - True             → cross-encoder rerank with default model (bge-reranker-v2-m3)
         - <model name>     → cross-encoder rerank with that model
@@ -1280,6 +1306,8 @@ def tool_memory_search(agent_id: str, query: str, category: str = None,
         except Exception:
             pass
 
+    results, _fam_fields = _familiarity_gate(db, query, results, abstain=abstain)
+
     if borrow_from:
         log_access(db, agent_id, "borrow", "memories", query=f"{query} [from:{borrow_from}]", result_count=len(results))
     else:
@@ -1306,7 +1334,7 @@ def tool_memory_search(agent_id: str, query: str, category: str = None,
 
     db.commit(); db.close()
     result = {"ok": True, "count": len(results), "memories": results,
-              "slot_cap": max_slots, "tier": tier}
+              "slot_cap": max_slots, "tier": tier, **_fam_fields}
     if borrow_from:
         result["borrowed_from"] = borrow_from
     return result
@@ -2022,8 +2050,12 @@ def tool_agent_wrap_up(agent_id: str, summary: str, goal: str = None,
 
 
 def tool_search(agent_id: str, query: str, limit: int = 20, vector: bool = False,
-                profile: str = None) -> dict:
-    """Cross-table search: memories + events + entities. Intent-aware routing."""
+                profile: str = None, abstain: bool = False) -> dict:
+    """Cross-table search: memories + events + entities. Intent-aware routing.
+
+    Adds ``answerable`` / ``familiarity`` (perirhinal familiarity gate);
+    ``abstain=True`` returns no results when the query looks unfamiliar.
+    """
     db = get_db()
     fts_q = _safe_fts(query)
     if not fts_q:
@@ -2181,9 +2213,10 @@ def tool_search(agent_id: str, query: str, limit: int = 20, vector: bool = False
         except Exception:
             pass
 
+    results, _fam_fields = _familiarity_gate(db, query, results, abstain=abstain)
     log_access(db, agent_id, "search", query=query, result_count=len(results))
     db.commit(); db.close()
-    return {"ok": True, "count": len(results), "results": results, **intent_meta}
+    return {"ok": True, "count": len(results), "results": results, **intent_meta, **_fam_fields}
 
 
 def tool_pagerank(table: str = None, damping: float = 0.85, iterations: int = 20,
@@ -2514,6 +2547,7 @@ TOOLS = [
                 "temporal_expand_hours": {"type": "integer", "default": 0, "description": "TCM temporal contiguity: after retrieval, add memories created within ±N hours of each result. Surfaces temporally co-occurring memories regardless of semantic similarity."},
                 "benchmark": {"type": "boolean", "default": False, "description": "Disable downstream rerankers (quantum amplitude, PageRank) and return raw FTS rank order. Mirrors `brainctl search --benchmark`. Use for synthetic-conversational evals where rerankers add noise on uniform fixtures."},
                 "rerank": {"type": ["boolean", "string"], "default": False, "description": "Cross-encoder reranker stage (opt-in, 2.4.0+). false (default) skips. true uses the default model (bge-reranker-v2-m3). Pass a model name string to pin one of: bge-reranker-v2-m3, jina-reranker-v2-base-multilingual, qwen3-reranker-4b. Adds 50ms (GPU) to 600ms (CPU) per query in exchange for typically +10-15pp P@1 on standard benchmarks. Requires `pip install 'brainctl[rerank]'`. See docs/RERANKER.md."},
+                "abstain": {"type": "boolean", "default": False, "description": "Familiarity gate opt-in. Every response carries answerable (bool) and familiarity (0-1: how much the best hit looks like an answer rather than a near-topic match). With abstain=true, an unfamiliar query returns no memories and answerable=false (\"not in memory\"). Default false keeps returning hits."},
             },
             "required": ["query"],
         },
@@ -2854,6 +2888,7 @@ TOOLS = [
                 "query": {"type": "string", "description": "Search query"},
                 "limit": {"type": "integer", "default": 20},
                 "vector": {"type": "boolean", "default": False, "description": "When true, run vector similarity search across vec_memories and vec_entities in a single pass, ranked by cosine score. FTS results still returned alongside."},
+                "abstain": {"type": "boolean", "default": False, "description": "Familiarity gate opt-in. Every response carries answerable (bool) and familiarity (0-1). With abstain=true, an unfamiliar query returns no results and answerable=false (\"not in memory\"). Default false keeps returning hits."},
             },
             "required": ["query"],
         },
