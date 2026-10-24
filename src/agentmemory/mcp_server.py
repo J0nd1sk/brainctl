@@ -997,10 +997,17 @@ def tool_memory_add(agent_id: str, content: str, category: str, scope: str = "gl
             db.execute("UPDATE memories SET gated_from_memory_id = ? WHERE id = ?", (supersedes_id, mid))
         except Exception:
             pass
-        # Interference control (migration 087): close the superseded fact's
-        # validity interval and retire it — same as `memory add --supersedes`.
-        from agentmemory.lib.validity import close_superseded as _close_superseded
-        _superseded_info = _close_superseded(db, supersedes_id, mid)
+        # Interference control (migration 087), same tier rule as
+        # `memory add --supersedes`: retire a weak incumbent (PII < 0.40),
+        # leave an ENTRENCHED / CRYSTALLIZED one active for the alpha/beta
+        # competition. The new memory gets valid_from either way.
+        from agentmemory.lib import validity as _validity
+        _validity.mark_valid_from(db, mid)
+        if _validity.incumbent_protected(pii_gate_info.get("incumbent_pii")):
+            _superseded_info = {"closed": False, "retired": False, "valid_to": None, "protected": True}
+        else:
+            _superseded_info = {**_validity.close_superseded(db, supersedes_id, mid), "protected": False}
+        pii_gate_info["incumbent_retired"] = bool(_superseded_info.get("retired"))
 
     # Encoding affect linkage (Eich & Metcalfe 1989, Morici et al. 2026):
     # Capture the agent's affect state at encoding time as a FK to affect_log.
@@ -1066,6 +1073,8 @@ def tool_memory_add(agent_id: str, content: str, category: str, scope: str = "gl
             "id": supersedes_id,
             "retired": bool(_superseded_info.get("retired")),
             "valid_to": _superseded_info.get("valid_to"),
+            "protected": bool(_superseded_info.get("protected")),
+            "incumbent_tier": pii_gate_info.get("incumbent_tier"),
         }
     return result
 
@@ -2553,7 +2562,7 @@ TOOLS = [
                 "tags": {"type": "string", "description": "Comma-separated tags"},
                 "memory_type": {"type": "string", "enum": ["episodic", "semantic", "procedural"], "default": "episodic"},
                 "force": {"type": "boolean", "description": "Bypass W(m) worthiness gate", "default": False},
-                "supersedes_id": {"type": "integer", "description": "ID of memory being superseded; triggers the PII recency gate, then closes the old memory's validity interval and retires it so the new value wins search"},
+                "supersedes_id": {"type": "integer", "description": "ID of memory being superseded; triggers the PII recency gate. An OPEN/ESTABLISHED incumbent (PII < 0.40) is retired (validity interval closed) so the new value wins search; an ENTRENCHED/CRYSTALLIZED one stays active and must be outcompeted on recall evidence"},
                 "source": {
                     "type": "string",
                     "enum": list(_SOURCE_TRUST_WEIGHTS),

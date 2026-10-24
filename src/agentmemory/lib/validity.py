@@ -8,17 +8,28 @@ means "since created_at" and ``valid_to`` NULL means "still true".
 Two halves:
 
 * **Write side.** :func:`close_superseded` runs when a new memory supersedes
-  an old one (``memory add --supersedes``, MCP ``memory_add(supersedes_id=)``,
-  ``memory replace``). It closes the old row's validity interval and
-  soft-retires it. Retiring takes it out of FTS and out of every
-  ``retired_at IS NULL`` read path. The row, its supersedes_id link and its
-  interval stay on disk, so :func:`version_chain` (``brainctl memory
-  history``) can show the full timeline for audit.
+  an old one. It closes the old row's validity interval and soft-retires it.
+  Retiring takes it out of FTS and out of every ``retired_at IS NULL`` read
+  path. The row, its supersedes_id link and its interval stay on disk, so
+  :func:`version_chain` (``brainctl memory history``) can show the full
+  timeline for audit.
+
+  ``memory replace`` (an explicit user override) always closes. ``memory add
+  --supersedes`` and MCP ``memory_add(supersedes_id=)`` close only when the
+  PII recency gate rates the incumbent below ENTRENCHED
+  (:func:`incumbent_protected`). An ENTRENCHED / CRYSTALLIZED incumbent stays
+  active and searchable. The new memory carries the supersedes link, a
+  ``valid_from`` and the gate's symmetric Beta(alpha_floor, alpha_floor)
+  prior, so it has to win the recall competition before it outranks the
+  incumbent. That is the memory-poisoning defence: one injected
+  "correction" cannot erase a crystallized fact.
 
 * **Read side.** :func:`superseded_among` lets ``cmd_search`` drop
   candidates that are no longer valid even though they were never retired:
-  links written before migration 087, AGM ``supersedes`` edges in
-  knowledge_edges, or a ``valid_to`` that has already passed.
+  a ``valid_to`` that has passed, or a supersedes link / AGM ``supersedes``
+  edge from an active memory (links written before migration 087). The
+  caller passes ``protect`` so link-based suppression follows the same PII
+  rule as the write side.
 
 Every helper works on a DB that predates migration 087 (it falls back to
 the supersedes link alone) and never raises into the caller's write or
@@ -29,15 +40,25 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set
 
 __all__ = [
+    "PII_PROTECT_THRESHOLD",
+    "PROTECTED_TIERS",
     "now_iso",
     "has_validity_columns",
+    "incumbent_protected",
     "close_superseded",
+    "mark_valid_from",
     "superseded_among",
     "version_chain",
 ]
+
+#: PII at or above which a superseded incumbent is NOT retired or suppressed.
+#: The ENTRENCHED tier boundary of ``_impl._PII_TIERS`` (0.70 CRYSTALLIZED,
+#: 0.40 ENTRENCHED, 0.20 ESTABLISHED, 0.00 OPEN).
+PII_PROTECT_THRESHOLD = 0.40
+PROTECTED_TIERS = ("ENTRENCHED", "CRYSTALLIZED")
 
 # Upper bound on IN (...) list size per query, under SQLite's default
 # SQLITE_MAX_VARIABLE_NUMBER of 999.
@@ -56,6 +77,28 @@ def has_validity_columns(db: sqlite3.Connection) -> bool:
     except sqlite3.Error:
         return False
     return "valid_to" in cols and "valid_from" in cols
+
+
+def incumbent_protected(pii: Optional[float]) -> bool:
+    """True when an incumbent this entrenched must stay in competition."""
+    try:
+        return float(pii or 0.0) >= PII_PROTECT_THRESHOLD
+    except (TypeError, ValueError):
+        return False
+
+
+def mark_valid_from(db: sqlite3.Connection, memory_id: Optional[int], *, now: Optional[str] = None) -> bool:
+    """Stamp ``valid_from`` on a superseding memory (no-op before 087 / if set)."""
+    if not memory_id or not has_validity_columns(db):
+        return False
+    try:
+        cur = db.execute(
+            "UPDATE memories SET valid_from = COALESCE(valid_from, ?) WHERE id = ?",
+            (now or now_iso(), int(memory_id)),
+        )
+    except (sqlite3.Error, TypeError, ValueError):
+        return False
+    return bool(cur.rowcount)
 
 
 def close_superseded(
@@ -119,6 +162,7 @@ def superseded_among(
     candidate_ids: Iterable[Any],
     *,
     now: Optional[str] = None,
+    protect: Optional[Callable[[int], bool]] = None,
 ) -> Set[int]:
     """Return the subset of ``candidate_ids`` that is no longer valid.
 
@@ -129,6 +173,10 @@ def superseded_among(
        ``S.supersedes_id = X``;
     3. an active memory S has a ``supersedes`` edge to X in knowledge_edges
        (the edge the AGM conflict resolver writes).
+
+    ``protect(X)`` returning True exempts X from rules 2 and 3 (an
+    entrenched incumbent the write side deliberately left in competition).
+    Rule 1 is a recorded decision and is never exempted.
 
     The caller decides whether to drop or down-weight these. Missing
     columns or tables (an older schema) skip that rule; nothing raises.
@@ -148,6 +196,7 @@ def superseded_among(
     # predecessor after the successor was in turn superseded.
     s_open = "AND (s.valid_to IS NULL OR julianday(s.valid_to) > julianday(?))" if has_cols else ""
     out: Set[int] = set()
+    linked: Set[int] = set()
     for chunk in _chunks(ids):
         ph = ",".join("?" * len(chunk))
         queries = []
@@ -172,13 +221,21 @@ def superseded_among(
             f"AND s.retired_at IS NULL {s_open}",
             list(chunk) + ([ts] if has_cols else []),
         ))
-        for sql, params in queries:
+        for n, (sql, params) in enumerate(queries):
+            closed_rule = has_cols and n == 0
             try:
                 for row in db.execute(sql, params).fetchall():
                     if row[0] is not None:
-                        out.add(int(row[0]))
+                        (out if closed_rule else linked).add(int(row[0]))
             except sqlite3.Error:
                 continue
+    for mid in sorted(linked - out):
+        try:
+            if protect is not None and protect(mid):
+                continue
+        except Exception:
+            continue  # unknown protection status: keep the candidate
+        out.add(mid)
     return out
 
 

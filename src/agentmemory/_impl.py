@@ -29,6 +29,8 @@ from agentmemory.lib.mcp_helpers import days_since as _days_since
 from agentmemory.lib import pattern_separation as _pattern_sep
 from agentmemory.lib.validity import (
     close_superseded as _close_superseded,
+    incumbent_protected as _incumbent_protected,
+    mark_valid_from as _mark_valid_from,
     superseded_among as _superseded_among,
     version_chain as _version_chain,
 )
@@ -3262,13 +3264,20 @@ def cmd_memory_add(args):
             )
         except Exception:
             pass  # column not yet migrated — non-fatal
-        # Interference control (migration 087): the superseded fact stops
-        # being valid now. Close its interval and retire it so it leaves
-        # FTS and every active-memory read path; the row and the
-        # supersedes_id link stay for `brainctl memory history`.
-        _superseded_info = _close_superseded(db, supersedes_id, memory_id)
+        # Interference control (migration 087), tier-aware. A weak incumbent
+        # (PII < 0.40: OPEN / ESTABLISHED) stops being valid now: close its
+        # interval and retire it so it leaves FTS and every active-memory
+        # read path; the row and the supersedes_id link stay for
+        # `brainctl memory history`. An ENTRENCHED / CRYSTALLIZED incumbent
+        # is left active and searchable. The new memory keeps the link, a
+        # valid_from and the symmetric Beta(alpha_floor, alpha_floor) prior
+        # set above, so it must earn recall evidence before it outranks the
+        # incumbent. One injected "correction" cannot erase a crystallized fact.
+        _superseded_info = _supersede_incumbent(
+            db, supersedes_id, memory_id, pii_info.get("incumbent_pii"))
+        pii_info["incumbent_retired"] = bool(_superseded_info.get("retired"))
+        db.commit()
         if _superseded_info.get("closed"):
-            db.commit()
             _try_vec_delete_memories(supersedes_id)
 
     # Encoding affect linkage (Eich & Metcalfe 1989, Morici et al. 2026):
@@ -3423,6 +3432,8 @@ def cmd_memory_add(args):
             "id": supersedes_id,
             "retired": bool(_superseded_info.get("retired")),
             "valid_to": _superseded_info.get("valid_to"),
+            "protected": bool(_superseded_info.get("protected")),
+            "incumbent_tier": pii_info.get("incumbent_tier"),
         }
     json_out(out)
 
@@ -3901,6 +3912,31 @@ def _pii_tier(score: float) -> str:
         if score >= threshold:
             return label
     return "OPEN"
+
+
+def _supersede_incumbent(db, old_id, new_id, incumbent_pii=None) -> dict:
+    """Apply a ``--supersedes`` write to the incumbent, PII-tier-aware.
+
+    Below ENTRENCHED: close its validity interval and retire it. At or
+    above: leave it active (``protected``) for the alpha/beta competition.
+    Either way the new memory gets ``valid_from``. ``memory replace`` does
+    not come through here; it is an explicit override and always retires.
+    The caller commits.
+    """
+    if incumbent_pii is None:
+        incumbent_pii = _compute_pii(db, old_id)
+    _mark_valid_from(db, new_id)
+    if _incumbent_protected(incumbent_pii):
+        return {"closed": False, "retired": False, "valid_to": None, "protected": True}
+    return {**_close_superseded(db, old_id, new_id), "protected": False}
+
+
+def _pii_protects(db, memory_id) -> bool:
+    """Search-time twin of the write rule: is this memory too entrenched to suppress?"""
+    try:
+        return _incumbent_protected(_compute_pii(db, int(memory_id)))
+    except Exception:
+        return False
 
 
 def cmd_memory_pii(args):
@@ -6562,12 +6598,14 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
             _adaptive_weights = None
     _max_recalls_cache = [None]  # lazy-compute once per cmd_search
 
-    # Interference control (migration 087). A memory that an active memory
-    # supersedes, or whose valid_to has passed, is a stale version of a fact.
-    # Drop it before fusion so it neither occupies a rank nor outranks the
-    # current version. Since 087 the supersede write path retires the old
-    # row, so this mostly catches links written before the migration and
-    # AGM `supersedes` edges whose loser was retracted but never retired.
+    # Interference control (migration 087). A memory whose valid_to has
+    # passed, or that an active memory supersedes, is a stale version of a
+    # fact. Drop it before fusion so it neither occupies a rank nor outranks
+    # the current version. Since 087 the supersede write path retires weak
+    # incumbents itself, so this mostly catches links written before the
+    # migration and AGM `supersedes` edges whose loser was never retired.
+    # Same PII rule as the write path: an ENTRENCHED / CRYSTALLIZED memory
+    # is never suppressed by a link alone; the alpha/beta competition ranks it.
     _include_superseded = bool(getattr(args, "include_superseded", False))
     _superseded_seen: set = set()
     _superseded_ids: set = set()
@@ -6580,7 +6618,8 @@ def cmd_search(args, *, db=None, db_path: Optional[str] = None):
         fresh = [i for i in mem_ids if i not in _superseded_seen]
         if fresh:
             try:
-                _superseded_ids.update(_superseded_among(db, fresh))
+                _superseded_ids.update(_superseded_among(
+                    db, fresh, protect=lambda mid: _pii_protects(db, mid)))
             except Exception:
                 pass  # suppression is best-effort; never break search
             _superseded_seen.update(fresh)
@@ -16765,9 +16804,10 @@ def build_parser():
     mem_add.add_argument("--dry-run-worthiness", action="store_true", dest="dry_run_worthiness",
                          help="Compute W(m) score and show result without writing")
     mem_add.add_argument("--supersedes", type=int, metavar="ID", dest="supersedes",
-                         help="ID of memory being superseded: applies the PII recency gate, then "
-                              "closes the old memory's validity interval (valid_to) and retires it. "
-                              "See `brainctl memory history <id>`.")
+                         help="ID of memory being superseded. Applies the PII recency gate: an "
+                              "OPEN/ESTABLISHED incumbent (PII < 0.40) has its validity interval closed "
+                              "and is retired; an ENTRENCHED/CRYSTALLIZED one stays active until the new "
+                              "memory outcompetes it. See `brainctl memory history <id>`.")
     mem_add.add_argument("--file", dest="file_path",
                          help="Anchor memory to a source file (e.g. src/auth/jwt.ts)")
     mem_add.add_argument("--line", type=int, dest="file_line",
@@ -17267,9 +17307,9 @@ def build_parser():
                        help="Disable 1-hop knowledge_edges expansion on top results")
     srch.add_argument("--include-superseded", action="store_true", dest="include_superseded",
                        help="Keep memories that an active memory supersedes (or whose valid_to has "
-                            "passed) in the results. Off by default: the current version of a fact wins. "
-                            "Superseded rows written since migration 087 are retired; see "
-                            "`brainctl memory history <id>` for the full timeline.")
+                            "passed) in the results. Off by default: the current version of a fact wins "
+                            "(ENTRENCHED/CRYSTALLIZED incumbents are never suppressed by a link alone). "
+                            "Retired versions are listed by `brainctl memory history <id>`.")
     srch.add_argument("--budget", type=int, default=None, metavar="TOKENS",
                        help="Hard token cap on search response (trim lowest-ranked entries first)")
     srch.add_argument("--min-salience", type=float, default=None, dest="min_salience", metavar="FLOOR",

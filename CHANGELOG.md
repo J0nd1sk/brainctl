@@ -32,12 +32,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   (MCP was 0%), false merges 0 (was 16.7%, the negation flips).
 - **Interference control: the latest value of a fact wins.** Migration 087
   adds bi-temporal `valid_from` / `valid_to` to memories. `memory add
-  --supersedes`, MCP `memory_add(supersedes_id=)` and `memory replace`
-  close the old memory's validity interval and retire it; the row and the
-  supersedes chain are kept, and the new `brainctl memory history <id>`
-  lists every version. `cmd_search` also drops candidates that an active
-  memory supersedes (via `supersedes_id` or an AGM `supersedes` edge) or
-  whose `valid_to` has passed (`--include-superseded` keeps them). Temporal
+  --supersedes` and MCP `memory_add(supersedes_id=)` are PII-tier-aware:
+  an OPEN / ESTABLISHED incumbent (PII < 0.40) has its validity interval
+  closed and is retired; an ENTRENCHED / CRYSTALLIZED one stays active and
+  searchable, so the new memory must win the existing alpha/beta
+  competition first (one injected "correction" cannot erase a crystallized
+  fact). The add output reports `pii_gate.incumbent_retired` and
+  `superseded.protected`. `memory replace` is an explicit override and
+  always retires. Rows and the supersedes chain are kept, and the new
+  `brainctl memory history <id>` lists every version. `cmd_search` also
+  drops candidates whose `valid_to` has passed, or that an active memory
+  supersedes (via `supersedes_id` or an AGM `supersedes` edge) when the
+  candidate's PII is below ENTRENCHED (`--include-superseded` keeps them). Temporal
   bench, `--supersedes` path: latest-value P@1 0.00 → 1.00, stale value in
   top-5 1.00 → 0.00.
 
