@@ -22,14 +22,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-DB_PATH = Path.home() / "agentmemory" / "db" / "brain.db"
+from agentmemory.paths import get_db_path
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
 def _connect(db_path: str | Path | None = None) -> sqlite3.Connection:
-    path = Path(db_path) if db_path else DB_PATH
+    path = Path(db_path) if db_path else get_db_path()
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     return conn
@@ -239,7 +239,7 @@ def force_collapse(
 
     Returns the collapsed_state label.
     """
-    path = Path(db_path) if db_path else DB_PATH
+    path = Path(db_path) if db_path else get_db_path()
 
     # Fetch amplitudes and coherence
     pre_amplitudes: dict = {}

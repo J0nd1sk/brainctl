@@ -91,9 +91,7 @@ def tool_collapse_log(
 ) -> dict:
     """List collapse events from belief_collapse_events."""
     try:
-        import sys
-        sys.path.insert(0, str(Path.home() / "agentmemory"))
-        from collapse_mechanics import list_collapse_events
+        from agentmemory.collapse_mechanics import list_collapse_events
     except ImportError as e:
         return {"ok": False, "error": f"collapse_mechanics import failed: {e}"}
 
@@ -111,9 +109,7 @@ def tool_collapse_log(
 def tool_collapse_stats() -> dict:
     """Show aggregate statistics for belief collapses."""
     try:
-        import sys
-        sys.path.insert(0, str(Path.home() / "agentmemory"))
-        from collapse_mechanics import collapse_stats
+        from agentmemory.collapse_mechanics import collapse_stats
     except ImportError as e:
         return {"ok": False, "error": f"collapse_mechanics import failed: {e}"}
 

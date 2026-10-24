@@ -33,7 +33,38 @@ from agentmemory.paths import get_db_path
 # below at the former _surprise_score_mcp callsite.
 from agentmemory._impl import _surprise_score
 logger = logging.getLogger(__name__)
-from mcp.server import Server
+
+_MCP_SDK_UNUSABLE_MESSAGE = """\
+brainctl-mcp: the MCP SDK could not be loaded ({detail}).
+brainctl needs mcp>=1.27.0,<2.0.0. Install or repair it with:
+
+  pip install 'brainctl[mcp]'
+  # or, if brainctl is managed by pipx:
+  pipx install --force 'brainctl[mcp]'
+"""
+
+
+def _exit_mcp_sdk_unusable(detail: str) -> None:
+    """Exit non-zero with a clear stderr message when the SDK is unusable.
+
+    Only acts when this module runs as a script (``python -m
+    agentmemory.mcp_server``), so a plain ``--list-tools`` can't fail
+    with nothing but a traceback. Library imports return here and let
+    the caller re-raise the original error, which pytest collection and
+    ``mcp_entrypoint`` rely on.
+    """
+    if __name__ == "__main__":
+        sys.stderr.write(_MCP_SDK_UNUSABLE_MESSAGE.format(detail=detail))
+        raise SystemExit(1)
+
+
+try:
+    from mcp.server import Server
+    from mcp.server.stdio import stdio_server
+    from mcp.types import Tool, TextContent
+except ImportError as _mcp_exc:
+    _exit_mcp_sdk_unusable(f"{type(_mcp_exc).__name__}: {_mcp_exc}")
+    raise
 
 # Extension tool modules — each exports TOOLS: list[Tool] and DISPATCH: dict
 try:
@@ -164,8 +195,6 @@ try:
 except ImportError as _e:
     logger.warning("Some extension tool modules failed to import: %s", _e)
     _EXT_MODULES = []
-from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
 
 # Query intent classification — route queries to appropriate tables
 try:
@@ -2322,11 +2351,8 @@ def tool_belief_collapse(
     limit: int = 20,
 ) -> dict:
     """Belief Collapse Mechanics: measurement operators + collapse event logging."""
-    import sys
-    from pathlib import Path as _Path
-    sys.path.insert(0, str(_Path.home() / "agentmemory"))
     try:
-        from collapse_mechanics import (
+        from agentmemory.collapse_mechanics import (
             force_collapse, list_collapse_events, collapse_stats,
             evaluate_coherence, is_superposed, check_and_collapse_on_time,
         )
@@ -3192,6 +3218,12 @@ def tool_affect_monitor(agent_id="mcp-client", **kw):
 # ---------------------------------------------------------------------------
 
 app = Server("brainctl")
+if not (hasattr(app, "list_tools") and hasattr(app, "call_tool")):
+    # mcp 2.x removed the decorator-style low-level Server API used below.
+    _exit_mcp_sdk_unusable(
+        "the installed mcp SDK has no Server.list_tools()/call_tool() "
+        "decorator API; it is probably mcp 2.x"
+    )
 
 
 def _invoke_dispatch_fn(fn, agent_id: str, arguments: dict):
@@ -3555,12 +3587,20 @@ async def main():
         # allowlist is the operator's explicit security intent and
         # shouldn't be silently ignored by an inspection flag.
         show_all = "--all" in sys.argv
+        listed = 0
         for t in TOOLS:
             if not show_all and t.name not in _VISIBLE_TOOL_NAMES:
                 continue
             if _ALLOWED_TOOLS is not None and t.name not in _ALLOWED_TOOLS:
                 continue
             print(f"  {t.name}: {t.description[:80]}")
+            listed += 1
+        if listed == 0:
+            # An empty listing means the tool surface failed to load; an
+            # exit-0 with no output would read as success to scripts.
+            print("brainctl-mcp: --list-tools found no tools to list.",
+                  file=sys.stderr)
+            raise SystemExit(1)
         return
 
     if "--doctor" in sys.argv:
