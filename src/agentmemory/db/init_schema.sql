@@ -98,7 +98,12 @@ CREATE TABLE memories (
         CHECK(temporal_level IN ('moment','session','day','week','month','quarter')),
     next_review_at TEXT DEFAULT NULL,
     q_value REAL DEFAULT 0.5
-);
+, valid_from TEXT DEFAULT NULL, valid_to TEXT DEFAULT NULL);
+-- valid_from / valid_to (migration 087): valid-time interval. NULL valid_from
+-- = since created_at; NULL valid_to = still true; a supersede sets valid_to.
+-- Written in the exact shape `ALTER TABLE ... ADD COLUMN` leaves in
+-- sqlite_master, because migration 052 rebuilds memories from a column list
+-- that predates 087 (tests/test_schema_parity.py compares the DDL text).
 
 CREATE INDEX idx_memories_agent ON memories(agent_id);
 
@@ -4080,3 +4085,10 @@ CREATE INDEX IF NOT EXISTS idx_entities_special_interest
 CREATE INDEX IF NOT EXISTS idx_affect_sensory_load
     ON affect_log(agent_id, sensory_load DESC)
     WHERE sensory_load IS NOT NULL;
+
+-- Migration 087: bi-temporal validity on memories (interference control).
+-- valid_from / valid_to live in the base CREATE TABLE memories above.
+CREATE INDEX IF NOT EXISTS idx_memories_supersedes
+    ON memories(supersedes_id) WHERE supersedes_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_memories_valid_to
+    ON memories(valid_to) WHERE valid_to IS NOT NULL;
