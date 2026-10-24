@@ -81,6 +81,7 @@ in `docs/TOOL_MIGRATION_V2.md`.
 - Retrieval regression-gated by `tests/bench/` (P@1 / P@5 / Recall@5 / MRR / nDCG@5; >2% drop fails CI)
 - W(m) worthiness gate on memory writes (surprise scoring + semantic dedup)
 - PII recency gate (Proactive Interference Index) on supersedes
+- Interference control (migration 087): a supersede closes the old memory's `valid_to` and retires it (history via `brainctl memory history <id>`); `cmd_search` drops candidates still superseded by an active memory, seeds keyword-only rows with BM25 strength so recency applies without embeddings, and breaks exact score ties newer-first (`src/agentmemory/lib/validity.py`)
 - Bayesian alpha/beta tracking on memory recall
 - Entities carry a rewriteable `compiled_truth` synthesis, a 3-level `enrichment_tier`, and a first-class `aliases` JSON list (migrations 033–035)
 - Knowledge-gap scanner (`brainctl gaps scan`) also detects orphan memories, broken knowledge_edges, and unreferenced entities (migration 036)

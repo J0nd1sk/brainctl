@@ -1,12 +1,12 @@
 {
   "by_mode": {
     "naive": {
-      "latest_mrr": 0.4444,
-      "latest_p_at_1": 0.0,
+      "latest_mrr": 1.0,
+      "latest_p_at_1": 1.0,
       "latest_recall_at_k": 1.0,
       "n_queries": 15,
       "n_updates": 17,
-      "stale_above_latest_rate": 1.0,
+      "stale_above_latest_rate": 0.0,
       "stale_in_top_k_rate": 1.0,
       "update_write_lost_rate": 0.0
     },
@@ -21,26 +21,26 @@
       "update_write_lost_rate": 0.0
     },
     "supersedes": {
-      "latest_mrr": 0.4444,
-      "latest_p_at_1": 0.0,
+      "latest_mrr": 1.0,
+      "latest_p_at_1": 1.0,
       "latest_recall_at_k": 1.0,
       "n_queries": 15,
       "n_updates": 17,
-      "stale_above_latest_rate": 1.0,
-      "stale_in_top_k_rate": 1.0,
+      "stale_above_latest_rate": 0.0,
+      "stale_in_top_k_rate": 0.0,
       "update_write_lost_rate": 0.0
     }
   },
   "k": 5,
   "n_facts": 12,
   "overall": {
-    "latest_mrr": 0.4444,
-    "latest_p_at_1": 0.0,
+    "latest_mrr": 1.0,
+    "latest_p_at_1": 1.0,
     "latest_recall_at_k": 1.0,
     "n_queries": 15,
     "n_updates": 17,
-    "stale_above_latest_rate": 1.0,
-    "stale_in_top_k_rate": 1.0,
+    "stale_above_latest_rate": 0.0,
+    "stale_in_top_k_rate": 0.0,
     "update_write_lost_rate": 0.0
   },
   "primary_mode": "supersedes",

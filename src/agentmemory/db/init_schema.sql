@@ -97,10 +97,13 @@ CREATE TABLE memories (
     temporal_level TEXT NOT NULL DEFAULT 'moment'
         CHECK(temporal_level IN ('moment','session','day','week','month','quarter')),
     next_review_at TEXT DEFAULT NULL,
-    q_value REAL DEFAULT 0.5,
-    valid_from TEXT DEFAULT NULL,                     -- valid-time start (NULL = since created_at), migration 087
-    valid_to TEXT DEFAULT NULL                        -- valid-time end (NULL = still true); set on supersede
-);
+    q_value REAL DEFAULT 0.5
+, valid_from TEXT DEFAULT NULL, valid_to TEXT DEFAULT NULL);
+-- valid_from / valid_to (migration 087): valid-time interval. NULL valid_from
+-- = since created_at; NULL valid_to = still true; a supersede sets valid_to.
+-- Written in the exact shape `ALTER TABLE ... ADD COLUMN` leaves in
+-- sqlite_master, because migration 052 rebuilds memories from a column list
+-- that predates 087 (tests/test_schema_parity.py compares the DDL text).
 
 CREATE INDEX idx_memories_agent ON memories(agent_id);
 

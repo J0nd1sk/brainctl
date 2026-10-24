@@ -30,8 +30,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   Decisions are logged to `hippocampus_pattern_separations`. Dedup bench:
   exact + case/punctuation duplicates now 100% suppressed on both paths
   (MCP was 0%), false merges 0 (was 16.7%, the negation flips).
+- **Interference control: the latest value of a fact wins.** Migration 087
+  adds bi-temporal `valid_from` / `valid_to` to memories. `memory add
+  --supersedes`, MCP `memory_add(supersedes_id=)` and `memory replace`
+  close the old memory's validity interval and retire it; the row and the
+  supersedes chain are kept, and the new `brainctl memory history <id>`
+  lists every version. `cmd_search` also drops candidates that an active
+  memory supersedes (via `supersedes_id` or an AGM `supersedes` edge) or
+  whose `valid_to` has passed (`--include-superseded` keeps them). Temporal
+  bench, `--supersedes` path: latest-value P@1 0.00 → 1.00, stale value in
+  top-5 1.00 → 0.00.
 
 ### Changed
+
+- Keyword-only search (no embedder, or the factual / strong-anchor vec
+  bypasses) now seeds each candidate with its BM25 strength instead of
+  0.0, so the recency, trust, source and context-match rerankers apply.
+  Q-value and quantum scoring stay off for those rows, as before. Exact
+  score ties go to the newer memory when the candidate set's timestamps
+  carry signal (the recency gate's 60 s spread); burst-ingested corpora
+  keep insertion order. Temporal bench, plain re-add: latest-value P@1
+  0.00 → 1.00. Retrieval, LongMemEval and LoCoMo gates unchanged.
 
 - The CLI's old pre-insert Jaccard dedup (all-words FTS AND match, raw
   whitespace tokens, any scope) is replaced by the shared gate above. A
