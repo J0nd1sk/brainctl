@@ -270,20 +270,20 @@ def _corpus_stats(db, stems: Sequence[str],
     if db is None or not stems:
         return None
     try:
-        n = int(db.execute(
-            "SELECT COUNT(*) FROM memories WHERE retired_at IS NULL"
-        ).fetchone()[0])
-        if n < MIN_CORPUS_FOR_IDF:
-            return None
-        # One statement for every term's document frequency.
+        # One statement for N and every term's document frequency.
         uniq = list(dict.fromkeys(stems))
-        sub = ", ".join(
-            "(SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH ?)" for _ in uniq
+        sub = "".join(
+            ", (SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH ?)" for _ in uniq
         )
         surface = surface or {}
-        counts = db.execute(f"SELECT {sub}",
-                            [_fts_phrase(surface.get(t, t)) for t in uniq]).fetchone()
-        return n, {t: int(c) for t, c in zip(uniq, counts)}
+        row = db.execute(
+            f"SELECT (SELECT COUNT(*) FROM memories WHERE retired_at IS NULL){sub}",
+            [_fts_phrase(surface.get(t, t)) for t in uniq],
+        ).fetchone()
+        n = int(row[0])
+        if n < MIN_CORPUS_FOR_IDF:
+            return None
+        return n, {t: int(c) for t, c in zip(uniq, row[1:])}
     except Exception:
         return None
 
@@ -503,7 +503,24 @@ def _score_candidates(
             stemmed.append(indexed[int(rid)])
         else:
             stemmed.append(_present_terms(_row_text(r), wanted))
-    bm25 = _raw_bm25(db, terms.stems, mem_ids, terms.surface) if stats else {}
+    bm25: Dict[int, float] = {}
+    if stats:
+        # Reuse the BM25 cmd_search's FTS pass already attached (same column
+        # weights; its OR expression also carries a few query variants, so
+        # this can only read slightly high). Compute it only for rows
+        # without one (MCP tools, recollection probes).
+        todo = []
+        for r in rows:
+            rid = r.get("id")
+            if rid is None or not _is_memory_row(r):
+                continue
+            fr = r.get("fts_rank")
+            if isinstance(fr, (int, float)) and fr < 0:
+                bm25[int(rid)] = -float(fr)
+            else:
+                todo.append(int(rid))
+        if todo:
+            bm25.update(_raw_bm25(db, terms.stems, todo, terms.surface))
     ideal = _ideal_bm25(terms, stats) if stats else None
     best: Tuple[float, Dict[str, Optional[float]], Optional[Dict[str, Any]], set] = (-1.0, {}, None, set())
     ranked_bm25 = sorted(bm25.values(), reverse=True)

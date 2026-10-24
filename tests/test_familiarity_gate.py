@@ -56,6 +56,7 @@ def test_corpus_stats_batched_in_one_statement(store):
     assert n == len(CORPUS)
     assert df == {"stage": 1, "databas": 1, "nowher": 0}
     assert sum("memories_fts MATCH" in q for q in seen) == 1
+    assert len([q for q in seen if not q.startswith("--")]) == 1  # N + df together
 
 
 def test_porter_matches_fts5_tokenizer():
